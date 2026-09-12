@@ -41,7 +41,17 @@ Then start a **new** session. Extensions do not hot-reload.
 /output-style 创建一个适合代码 Review 的 output style
 ```
 
-The rule is one line: *a single word that names a style, `off`, or `none` is management; anything else is a request for the agent.* So `/output-style concise` activates, and `/output-style rewrite concise` asks. To review a style whose name you would otherwise activate, say more than its name.
+**Configure it** — `/output-style config`:
+
+```text
+/output-style config                       interactive: pick the default and the indicator
+/output-style config default caveman       set the cross-session default
+/output-style config default off           clear it
+/output-style config indicator widget      where the active style shows
+/output-style config indicator             read one setting back
+```
+
+The rule is one line: *`config` and a single word that names a style, `off`, or `none` are management; anything else is a request for the agent.* So `/output-style concise` activates, and `/output-style rewrite concise` asks. To review a style whose name you would otherwise activate, say more than its name.
 
 While composing the command, a hint line under the editor shows both forms.
 
@@ -97,12 +107,27 @@ Precedence:
 
 ## Config
 
+`/output-style config` holds the two things that are worth setting once. Both live in `~/.pi/agent/output-styles.json`, so they apply to every session and every project without re-stating anything.
+
+| Key | Values | What it does |
+| --- | --- | --- |
+| `default` | a style name, or `off` | The style every new session starts with. Alias: `style`. |
+| `indicator` | `status`, `widget`, `off` | Where the active style shows. Default `status`. |
+
+A bare key reads the value back. An unknown key is an error, not a silent no-op. Running `config` with no arguments opens a dialog per setting; in a non-dialog run (print or JSON mode) it prints the current config instead.
+
+The indicator is a display preference, so like the default style the personal setting wins over a project one, and a project setting applies when you have none.
+
+To set a default without opening dialogs, `/output-style <name> --save` does the same thing.
+
+## File locations
+
 | | Path |
 | --- | --- |
 | Project styles | `<repo>/.pi/output-styles/` |
 | User styles | `~/.pi/agent/output-styles/` |
 | Project default (`--project`) | `<repo>/.pi/output-styles.json` |
-| User default (`--save`) | `~/.pi/agent/output-styles.json` |
+| User default + config (`--save`, `config`) | `~/.pi/agent/output-styles.json` |
 
 Environment:
 

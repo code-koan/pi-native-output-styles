@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- `/output-style config` for the two settings worth persisting. It runs from the user config file, so both apply to every session and project:
+  - `config default <style|off>` — the style new sessions start with.
+  - `config indicator <status|widget|off>` — where the active style is shown; `status` is the default.
+- Run `config` with no arguments for a dialog per setting. A bare key reads the value back, an unknown key is an error, and a run without a dialog UI prints the config instead.
+- A `widget` indicator renders the style above the editor. Every refresh writes both surfaces, so switching modes can never leave a stale badge.
+
+### Changed
+
+- `config` joins the management words in the command router. `configure this style` still routes to the agent.
+- Clearing a saved default now merges state instead of overwriting the file, so it no longer drops the indicator setting.
+
 ## 0.5.0
 
 One command, plus a bundled style and an agent that maintains styles.

@@ -35,6 +35,7 @@ interface ExtensionUI {
   setWidget(key: string, lines: string[] | undefined, options?: { placement: "aboveEditor" | "belowEditor" }): void;
   getEditorText(): string;
   notify(message: string, type?: NotifyType): void;
+  select?(title: string, options: string[]): Promise<string | undefined>;
 }
 
 interface ExtensionContext {
@@ -143,13 +144,25 @@ export function bundledStylesDir(): string {
 
 export interface StyleState {
   active?: string;
+  indicator?: IndicatorMode;
+}
+
+/** Where the active style is shown. `status` is the default. */
+export const INDICATOR_MODES = ["status", "widget", "off"] as const;
+export type IndicatorMode = (typeof INDICATOR_MODES)[number];
+
+export function isIndicatorMode(value: unknown): value is IndicatorMode {
+  return typeof value === "string" && (INDICATOR_MODES as readonly string[]).includes(value);
 }
 
 export function readState(file: string): StyleState {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-    if (parsed && typeof parsed === "object" && "active" in parsed && typeof parsed.active === "string") {
-      return { active: parsed.active };
+    if (parsed && typeof parsed === "object") {
+      const state: StyleState = {};
+      if ("active" in parsed && typeof parsed.active === "string") state.active = parsed.active;
+      if ("indicator" in parsed && isIndicatorMode(parsed.indicator)) state.indicator = parsed.indicator;
+      return state;
     }
   } catch {
     // missing or malformed → empty
@@ -160,6 +173,13 @@ export function readState(file: string): StyleState {
 export function writeState(file: string, state: StyleState): void {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(state, null, 2) + "\n");
+}
+
+// Merge, never replace: clearing the default must not drop the indicator
+// setting, and setting the indicator must not drop the default. A key passed
+// as undefined drops out of the JSON, which is how a key is cleared.
+export function updateState(file: string, patch: StyleState): void {
+  writeState(file, { ...readState(file), ...patch });
 }
 
 export function userStateFile(): string {
@@ -177,6 +197,12 @@ export function resolveActiveName(
   projectState: StyleState,
 ): string | null {
   return sessionActive ?? userState.active ?? projectState.active ?? null;
+}
+
+// The indicator is presentation, so it resolves from the same places as the
+// default style but falls back to the status bar.
+export function resolveIndicator(cwd: string): IndicatorMode {
+  return readState(userStateFile()).indicator ?? readState(projectStateFile(cwd)).indicator ?? "status";
 }
 
 const MARKER_PREFIX = "<!-- output-styles:";
@@ -224,16 +250,20 @@ export function parseStyleCommandArgs(args: string): StyleCommandArgs {
   return { name, persist };
 }
 
-// One command serves both jobs, so the split has to be guessable from the
-// words alone. Rule: the request is style management only when it is empty,
-// or its single non-flag word is `off`/`none` or a style that exists. Anything
-// else is a task for the agent. `/output-style concise` activates; `/output-style
-// rewrite concise` asks the agent.
-export type StyleCommandRoute = { kind: "manage" } | { kind: "task"; request: string };
+// One command serves every job, so the split has to be guessable from the
+// words alone. Rule, in order: the request is `config` when it starts with the
+// config word; empty, `off`, `none`, or a single word naming an existing style
+// is style management; anything else is a task for the agent. `/output-style
+// concise` activates; `/output-style rewrite concise` asks the agent.
+export type StyleCommandRoute =
+  | { kind: "config"; args: string }
+  | { kind: "manage" }
+  | { kind: "task"; request: string };
 
 export function routeStyleCommand(args: string, styleNames: Iterable<string>): StyleCommandRoute {
   const request = args.trim();
   if (request.length === 0) return { kind: "manage" };
+  if (/^config(?=\s|$)/i.test(request)) return { kind: "config", args: request.replace(/^config\s*/i, "").trim() };
   const words = request.split(/\s+/).filter(t => t.length > 0 && !t.startsWith("--"));
   if (words.length === 0) return { kind: "manage" }; // flags only
   if (words.length > 1) return { kind: "task", request };
@@ -251,13 +281,14 @@ export function resolveStyleName(name: string, styleNames: Iterable<string>): st
 }
 
 const STATUS_KEY = "output-styles";
+const INDICATOR_KEY = "output-styles-indicator";
 const HINT_KEY = "output-styles-hint";
 // Persistent ghost hint shown below the editor while `/output-style` is being
 // composed. Pi only renders inline usage ghost text for builtin commands, so
 // this widget carries the same message for extension commands.
 const STYLE_HINT_LINES = [
   "/output-style <name|off> [--save] [--project]",
-  "/output-style <ask the agent to review, rewrite, or create a style>",
+  "/output-style config — default style, indicator",
 ];
 
 // Pure matcher for the widget: show the hint while the input starts with the
@@ -360,9 +391,19 @@ export function resolveActiveStyle(cwd: string, styles?: Map<string, Style>): St
   return map.get(name) ?? null;
 }
 
-function refreshStatus(ctx: ExtensionContext, style: Style | null): void {
-  if (!ctx.hasUI || typeof ctx.ui.setStatus !== "function") return;
-  ctx.ui.setStatus(STATUS_KEY, style ? `style: ${style.name}` : undefined);
+// One renderer for every call site, so switching the mode can never leave a
+// stale badge behind: both surfaces are written on every refresh, and only the
+// configured one gets text.
+function renderIndicator(ctx: ExtensionContext, style: Style | null): void {
+  if (!ctx.hasUI) return;
+  const mode = resolveIndicator(ctx.cwd);
+  const label = style ? `style: ${style.name}` : undefined;
+  if (typeof ctx.ui.setStatus === "function") {
+    ctx.ui.setStatus(STATUS_KEY, mode === "status" ? label : undefined);
+  }
+  if (typeof ctx.ui.setWidget === "function") {
+    ctx.ui.setWidget(INDICATOR_KEY, mode === "widget" && label ? [label] : undefined, { placement: "aboveEditor" });
+  }
 }
 
 // The Leader brief is plain Markdown next to the extension, so its wording can
@@ -396,9 +437,104 @@ export function buildStyleTask(brief: string, cwd: string, active: Style | null,
   ].join("\n");
 }
 
+export type ConfigKey = "default" | "indicator";
+
+export interface ConfigArgs {
+  /** null means "no key given" — open the interactive flow. */
+  key: ConfigKey | null;
+  value: string;
+}
+
+const CONFIG_KEY_ALIASES: Record<string, ConfigKey> = {
+  default: "default",
+  style: "default",
+  indicator: "indicator",
+};
+
+// `null` means an unrecognised key; `{key: null}` means no key at all.
+export function parseConfigArgs(args: string): ConfigArgs | null {
+  const tokens = args.trim().split(/\s+/).filter(t => t.length > 0);
+  if (tokens.length === 0) return { key: null, value: "" };
+  const key = CONFIG_KEY_ALIASES[tokens[0].toLowerCase()];
+  if (!key) return null;
+  return { key, value: tokens.slice(1).join(" ") };
+}
+
+function describeConfig(cwd: string): string {
+  return `Default style (new sessions): ${readState(userStateFile()).active ?? "(none)"}\nStyle indicator: ${resolveIndicator(cwd)}`;
+}
+
+function applyConfigValue(key: ConfigKey, value: string, ctx: ExtensionContext, styles: Map<string, Style>): void {
+  const raw = value.trim();
+
+  if (key === "default") {
+    if (raw.length === 0) {
+      ctx.ui.notify(`Default style (new sessions): ${readState(userStateFile()).active ?? "(none)"}`, "info");
+      return;
+    }
+    if (OFF_WORDS[raw.toLowerCase()]) {
+      updateState(userStateFile(), { active: undefined });
+      ctx.ui.notify("Default style cleared. New sessions start with no style.", "info");
+      renderIndicator(ctx, resolveActiveStyle(ctx.cwd, styles));
+      return;
+    }
+    const name = resolveStyleName(raw, styles.keys());
+    if (!name) {
+      ctx.ui.notify(`Unknown style "${raw}". Available: ${[...styles.keys()].sort().join(", ") || "(none)"}`, "error");
+      return;
+    }
+    updateState(userStateFile(), { active: name });
+    ctx.ui.notify(`Default style → "${name}" for every new session and project.`, "info");
+    renderIndicator(ctx, resolveActiveStyle(ctx.cwd, styles));
+    return;
+  }
+
+  if (raw.length === 0) {
+    ctx.ui.notify(`Style indicator: ${resolveIndicator(ctx.cwd)}`, "info");
+    return;
+  }
+  if (!isIndicatorMode(raw)) {
+    ctx.ui.notify(`Indicator must be one of: ${INDICATOR_MODES.join(", ")}`, "error");
+    return;
+  }
+  updateState(userStateFile(), { indicator: raw });
+  ctx.ui.notify(`Style indicator → ${raw}`, "info");
+  renderIndicator(ctx, resolveActiveStyle(ctx.cwd, styles));
+}
+
+// Interactive path: two dialogs, then a summary. Falls back to printing when
+// the run has no dialog-capable UI (print/json modes).
+async function openConfigDialogs(ctx: ExtensionContext, styles: Map<string, Style>): Promise<void> {
+  if (typeof ctx.ui.select !== "function") {
+    ctx.ui.notify(describeConfig(ctx.cwd), "info");
+    return;
+  }
+
+  const current = readState(userStateFile()).active ?? "(none)";
+  const chosen = await ctx.ui.select(`Default output style for new sessions (now: ${current})`, [
+    "(keep current)",
+    "(none)",
+    ...[...styles.keys()].sort(),
+  ]);
+  if (chosen !== undefined && chosen !== "(keep current)") {
+    updateState(userStateFile(), { active: chosen === "(none)" ? undefined : chosen });
+  }
+
+  const mode = await ctx.ui.select(`Style indicator (now: ${resolveIndicator(ctx.cwd)})`, [
+    "(keep current)",
+    ...INDICATOR_MODES,
+  ]);
+  if (mode !== undefined && mode !== "(keep current)" && isIndicatorMode(mode)) {
+    updateState(userStateFile(), { indicator: mode });
+  }
+
+  renderIndicator(ctx, resolveActiveStyle(ctx.cwd, styles));
+  ctx.ui.notify(`Saved.\n${describeConfig(ctx.cwd)}`, "info");
+}
+
 export default function outputStyles(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
-    refreshStatus(ctx, resolveActiveStyle(ctx.cwd));
+    renderIndicator(ctx, resolveActiveStyle(ctx.cwd));
     if (started || !ctx.hasUI) return;
     started = true;
     startHintPoller(ctx);
@@ -412,14 +548,14 @@ export default function outputStyles(pi: ExtensionAPI): void {
     try {
       const style = resolveActiveStyle(ctx.cwd);
       if (!style) {
-        refreshStatus(ctx, null);
+        renderIndicator(ctx, null);
         return;
       }
       // Apply first; only reflect the style in the status line once the prompt
       // was actually augmented, so a swallowed throw never advertises a style
       // the turn did not apply.
       const systemPrompt = applyStyle(event.systemPrompt ?? "", style);
-      refreshStatus(ctx, style);
+      renderIndicator(ctx, style);
       return { systemPrompt };
     } catch {
       return; // never fail a turn over a styling concern
@@ -430,9 +566,20 @@ export default function outputStyles(pi: ExtensionAPI): void {
     description:
       "Select an output style, or ask the agent to review, rewrite, or create one. Usage: /output-style <name|off|what you want> [--save] [--project]",
     getArgumentCompletions: argumentPrefix => styleCompletions(argumentPrefix, process.cwd()),
-    handler: (args, ctx) => {
+    handler: async (args, ctx) => {
       const styles = discoverStyles(styleDirs(ctx.cwd));
       const route = routeStyleCommand(args, styles.keys());
+
+      if (route.kind === "config") {
+        const parsed = parseConfigArgs(route.args);
+        if (parsed === null) {
+          ctx.ui.notify("Config keys: default <style|off>, indicator <status|widget|off>", "error");
+          return;
+        }
+        if (parsed.key === null) await openConfigDialogs(ctx, styles);
+        else applyConfigValue(parsed.key, parsed.value, ctx, styles);
+        return;
+      }
 
       if (route.kind === "task") {
         let task: string;
@@ -478,16 +625,16 @@ export default function outputStyles(pi: ExtensionAPI): void {
         let offScope = "this session";
         try {
           if (persist === "user") {
-            writeState(userStateFile(), {});
+            updateState(userStateFile(), { active: undefined });
             offScope = "cleared · user default";
           } else if (persist === "project") {
-            writeState(projectStateFile(ctx.cwd), {});
+            updateState(projectStateFile(ctx.cwd), { active: undefined });
             offScope = "cleared · project default";
           }
         } catch (err) {
           ctx.ui.notify(`Cleared for this session, but updating the saved default failed: ${String(err)}`, "warning");
         }
-        refreshStatus(ctx, null);
+        renderIndicator(ctx, null);
         ctx.ui.notify(`Output style off (${offScope}).`, "info");
         return;
       }
@@ -500,16 +647,16 @@ export default function outputStyles(pi: ExtensionAPI): void {
       let scope = "this session";
       try {
         if (persist === "user") {
-          writeState(userStateFile(), { active: name });
+          updateState(userStateFile(), { active: name });
           scope = "saved · user default";
         } else if (persist === "project") {
-          writeState(projectStateFile(ctx.cwd), { active: name });
+          updateState(projectStateFile(ctx.cwd), { active: name });
           scope = "saved · project default";
         }
       } catch (err) {
         ctx.ui.notify(`Applied for this session, but saving failed: ${String(err)}`, "warning");
       }
-      refreshStatus(ctx, styles.get(name) ?? null);
+      renderIndicator(ctx, styles.get(name) ?? null);
       ctx.ui.notify(`Output style → "${name}" (${scope}).`, "info");
     },
   });

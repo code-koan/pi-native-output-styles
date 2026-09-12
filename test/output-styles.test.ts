@@ -7,6 +7,10 @@ import outputStyles, {
   discoverStyles,
   readState,
   writeState,
+  updateState,
+  resolveIndicator,
+  parseConfigArgs,
+  INDICATOR_MODES,
   resolveActiveName,
   applyStyle,
   parseStyleCommandArgs,
@@ -259,9 +263,11 @@ interface Captured {
   handlers: Record<string, (event: unknown, ctx: FakeCtx) => unknown>;
   statuses: (string | undefined)[];
   notes: { message: string; type?: string }[];
-  widgets: { key: string; lines: string[] | null }[];
+  widgets: { key: string; lines: string[] | null; placement?: string }[];
   timers: (() => void)[];
   userMessages: { content: string; deliverAs?: string }[];
+  selectCalls: { title: string; options: string[] }[];
+  selectAnswers: (string | undefined)[];
   editorText: string;
 }
 interface FakeCtx {
@@ -270,9 +276,10 @@ interface FakeCtx {
   isIdle: () => boolean;
   ui: {
     setStatus: (k: string, t: string | undefined) => void;
-    setWidget: (k: string, lines: string[] | undefined) => void;
+    setWidget: (k: string, lines: string[] | undefined, options?: { placement: "aboveEditor" | "belowEditor" }) => void;
     getEditorText: () => string;
     notify: (m: string, t?: string) => void;
+    select: (title: string, options: string[]) => Promise<string | undefined>;
   };
   setInterval: (cb: () => void, ms?: number) => unknown;
 }
@@ -286,6 +293,8 @@ function harness(cwd: string): { cap: Captured; ctx: FakeCtx } {
     widgets: [],
     timers: [],
     userMessages: [],
+    selectCalls: [],
+    selectAnswers: [],
     editorText: "",
   };
   const ctx: FakeCtx = {
@@ -294,9 +303,14 @@ function harness(cwd: string): { cap: Captured; ctx: FakeCtx } {
     isIdle: () => true,
     ui: {
       setStatus: (_k, t) => cap.statuses.push(t),
-      setWidget: (k, lines) => cap.widgets.push({ key: k, lines: lines ?? null }),
+      setWidget: (k, lines, options) =>
+        cap.widgets.push({ key: k, lines: lines ?? null, placement: options?.placement }),
       getEditorText: () => cap.editorText,
       notify: (m, t) => cap.notes.push({ message: m, type: t }),
+      select: (title, options) => {
+        cap.selectCalls.push({ title, options });
+        return Promise.resolve(cap.selectAnswers.shift());
+      },
     },
     setInterval: cb => {
       cap.timers.push(cb);
@@ -568,7 +582,7 @@ describe("styleHintFor", () => {
       // Line 1 is the management form, line 2 advertises the agent form.
       expect(lines![0]).toContain("--save");
       expect(lines![0]).toContain("--project");
-      expect(lines![1]).toContain("review, rewrite, or create");
+      expect(lines![1]).toContain("config");
     }
   });
 
@@ -813,5 +827,252 @@ describe("/output-style while streaming", () => {
     await cap.commands["output-style"]("rewrite the eli5 style", busy);
     expect(cap.userMessages).toHaveLength(1);
     expect(cap.userMessages[0].deliverAs).toBe("followUp");
+  });
+});
+
+describe("state merge", () => {
+  test("updateState preserves the key it is not changing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pos-merge-"));
+    const file = join(dir, "state.json");
+    writeState(file, { active: "teacher", indicator: "widget" });
+    updateState(file, { indicator: "off" });
+    expect(readState(file)).toEqual({ active: "teacher", indicator: "off" });
+    updateState(file, { active: undefined });
+    expect(readState(file)).toEqual({ indicator: "off" });
+  });
+
+  test("readState drops an invalid indicator instead of trusting it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pos-merge-"));
+    const file = join(dir, "state.json");
+    writeFileSync(file, JSON.stringify({ active: "teacher", indicator: "loud" }));
+    expect(readState(file)).toEqual({ active: "teacher" });
+  });
+});
+
+describe("resolveIndicator", () => {
+  test("defaults to the status bar", () => {
+    freshCwd("pos-ind-");
+    expect(resolveIndicator(mkdtempSync(join(tmpdir(), "pos-ind-")))).toBe("status");
+  });
+
+  test("reads the user root, which is what makes it cross-session", () => {
+    const cwd = freshCwd("pos-ind-");
+    updateState(userStateFile(), { indicator: "widget" });
+    expect(resolveIndicator(cwd)).toBe("widget");
+  });
+
+  test("the personal setting wins over a project setting, like the default style does", () => {
+    const cwd = freshCwd("pos-ind-");
+    updateState(userStateFile(), { indicator: "widget" });
+    updateState(projectStateFile(cwd), { indicator: "off" });
+    expect(resolveIndicator(cwd)).toBe("widget");
+  });
+
+  test("a project setting applies when the user has none", () => {
+    const cwd = freshCwd("pos-ind-");
+    updateState(projectStateFile(cwd), { indicator: "off" });
+    expect(resolveIndicator(cwd)).toBe("off");
+  });
+});
+
+describe("parseConfigArgs", () => {
+  test("no arguments asks for the interactive flow", () => {
+    expect(parseConfigArgs("")).toEqual({ key: null, value: "" });
+    expect(parseConfigArgs("   ")).toEqual({ key: null, value: "" });
+  });
+
+  test("a key without a value reads back instead of writing", () => {
+    expect(parseConfigArgs("default")).toEqual({ key: "default", value: "" });
+    expect(parseConfigArgs("indicator")).toEqual({ key: "indicator", value: "" });
+  });
+
+  test("accepts the style alias for default", () => {
+    expect(parseConfigArgs("style caveman")).toEqual({ key: "default", value: "caveman" });
+  });
+
+  test("rejects an unknown key", () => {
+    expect(parseConfigArgs("colour red")).toBe(null);
+  });
+
+  test("keeps a multi-word value intact", () => {
+    expect(parseConfigArgs("default some style")).toEqual({ key: "default", value: "some style" });
+  });
+});
+
+describe("routeStyleCommand config routing", () => {
+  const names = ["teacher"];
+
+  test("config with no arguments routes to config", () => {
+    expect(routeStyleCommand("config", names)).toEqual({ kind: "config", args: "" });
+  });
+
+  test("config carries its trailing arguments", () => {
+    expect(routeStyleCommand("config indicator off", names)).toEqual({ kind: "config", args: "indicator off" });
+    expect(routeStyleCommand("CONFIG default teacher", names)).toEqual({ kind: "config", args: "default teacher" });
+  });
+
+  test("words that merely start with config are not the config command", () => {
+    expect(routeStyleCommand("configure this style", names)).toEqual({
+      kind: "task",
+      request: "configure this style",
+    });
+  });
+});
+
+describe("/output-style config", () => {
+  test("default <name> persists a cross-session default", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config default teacher", ctx);
+    expect(readState(userStateFile())).toEqual({ active: "teacher" });
+    // Cross-session: a different project with no state of its own resolves it.
+    const other = mkdtempSync(join(tmpdir(), "pos-cfg-other-"));
+    expect(resolveActiveName(null, readState(userStateFile()), readState(projectStateFile(other)))).toBe("teacher");
+    expect(cap.userMessages).toHaveLength(0);
+    expect(cap.notes.some(n => n.message.includes('Default style → "teacher"'))).toBe(true);
+  });
+
+  test("default resolves case-insensitively and rejects an unknown style", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config default Teacher", ctx);
+    expect(readState(userStateFile())).toEqual({ active: "teacher" });
+    await cap.commands["output-style"]("config default nope", ctx);
+    expect(readState(userStateFile())).toEqual({ active: "teacher" });
+    expect(cap.notes.some(n => n.type === "error" && n.message.includes('Unknown style "nope"'))).toBe(true);
+  });
+
+  test("default off clears the default but keeps the indicator setting", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config indicator widget", ctx);
+    await cap.commands["output-style"]("config default teacher", ctx);
+    await cap.commands["output-style"]("config default off", ctx);
+    expect(readState(userStateFile())).toEqual({ indicator: "widget" });
+  });
+
+  test("indicator accepts only the known modes", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config indicator loud", ctx);
+    expect(readState(userStateFile())).toEqual({});
+    expect(cap.notes.some(n => n.type === "error" && n.message.includes(INDICATOR_MODES.join(", ")))).toBe(true);
+  });
+
+  test("a bare key reads the current value instead of writing", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config indicator", ctx);
+    expect(readState(userStateFile())).toEqual({});
+    expect(cap.notes.some(n => n.message.includes("Style indicator: status"))).toBe(true);
+  });
+
+  test("saving a default keeps the indicator setting (live-caught regression)", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config indicator widget", ctx);
+    await cap.commands["output-style"]("teacher --save", ctx);
+    expect(readState(userStateFile())).toEqual({ active: "teacher", indicator: "widget" });
+  });
+
+  test("saving a project default keeps the project indicator setting", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    updateState(projectStateFile(cwd), { indicator: "off" });
+    await cap.commands["output-style"]("teacher --project", ctx);
+    expect(readState(projectStateFile(cwd))).toEqual({ active: "teacher", indicator: "off" });
+  });
+
+  test("an unknown key is reported, not silently ignored", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("config colour red", ctx);
+    expect(cap.notes.some(n => n.type === "error" && n.message.includes("Config keys:"))).toBe(true);
+  });
+
+  test("no arguments opens both dialogs and saves the answers", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    cap.selectAnswers.push("teacher", "widget");
+    await cap.commands["output-style"]("config", ctx);
+    expect(cap.selectCalls).toHaveLength(2);
+    expect(cap.selectCalls[0].options).toContain("teacher");
+    expect(cap.selectCalls[1].options).toEqual(["(keep current)", ...INDICATOR_MODES]);
+    expect(readState(userStateFile())).toEqual({ active: "teacher", indicator: "widget" });
+  });
+
+  test("dismissing a dialog keeps the current value", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    updateState(userStateFile(), { active: "teacher", indicator: "status" });
+    cap.selectAnswers.push(undefined, undefined);
+    await cap.commands["output-style"]("config", ctx);
+    expect(readState(userStateFile())).toEqual({ active: "teacher", indicator: "status" });
+  });
+
+  test("(keep current) and (none) are honoured", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    updateState(userStateFile(), { active: "teacher" });
+    cap.selectAnswers.push("(keep current)", "(keep current)");
+    await cap.commands["output-style"]("config", ctx);
+    expect(readState(userStateFile())).toEqual({ active: "teacher" });
+
+    cap.selectAnswers.push("(none)", "(keep current)");
+    await cap.commands["output-style"]("config", ctx);
+    expect(readState(userStateFile())).toEqual({});
+  });
+
+  test("without a dialog UI it prints the config instead of opening dialogs", async () => {
+    const cwd = freshCwd("pos-cfg-");
+    const { cap, ctx } = harness(cwd);
+    const headless: FakeCtx = { ...ctx, ui: { ...ctx.ui, select: undefined as never } };
+    await cap.commands["output-style"]("config", headless);
+    expect(cap.selectCalls).toHaveLength(0);
+    expect(cap.notes.some(n => n.message.includes("Style indicator: status"))).toBe(true);
+  });
+});
+
+describe("indicator rendering", () => {
+  const styleName = "teacher";
+
+  const render = async (indicator: string) => {
+    const cwd = freshCwd("pos-render-");
+    if (indicator !== "status") updateState(userStateFile(), { indicator: indicator as never });
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"](styleName, ctx);
+    return cap;
+  };
+
+  test("status mode writes the status bar and leaves no widget", async () => {
+    const cap = await render("status");
+    expect(cap.statuses.at(-1)).toBe("style: teacher");
+    expect(cap.widgets.filter(w => w.key === "output-styles-indicator" && w.lines)).toHaveLength(0);
+  });
+
+  test("widget mode writes an above-editor badge and clears the status bar", async () => {
+    const cap = await render("widget");
+    expect(cap.statuses.at(-1)).toBeUndefined();
+    const badge = cap.widgets.filter(w => w.key === "output-styles-indicator" && w.lines);
+    expect(badge).toHaveLength(1);
+    expect(badge[0].lines).toEqual(["style: teacher"]);
+    expect(badge[0].placement).toBe("aboveEditor");
+  });
+
+  test("off mode writes neither surface", async () => {
+    const cap = await render("off");
+    expect(cap.statuses.at(-1)).toBeUndefined();
+    expect(cap.widgets.filter(w => w.key === "output-styles-indicator" && w.lines)).toHaveLength(0);
+  });
+
+  test("switching back to status clears the leftover widget", async () => {
+    const cwd = freshCwd("pos-render-");
+    updateState(userStateFile(), { indicator: "widget" });
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("teacher", ctx);
+    updateState(userStateFile(), { indicator: "status" });
+    await cap.commands["output-style"]("off", ctx);
+    const cleared = cap.widgets.filter(w => w.key === "output-styles-indicator" && w.lines === null);
+    expect(cleared.length).toBeGreaterThan(0);
   });
 });
