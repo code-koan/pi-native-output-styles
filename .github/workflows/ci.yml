@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           npm pack --silent
-          tar tzf pi-output-styles-*.tgz | tee /tmp/files.txt
+          tar tzf pi-native-output-styles-*.tgz | tee /tmp/files.txt
           grep -qx 'package/extensions/output-styles.ts' /tmp/files.txt
           grep -qx 'package/extensions/styles/teacher.md' /tmp/files.txt
           grep -qx 'package/extensions/styles/concise.md' /tmp/files.txt
@@ -41,4 +41,4 @@ jobs:
           grep -qx 'package/README.md' /tmp/files.txt
           grep -qx 'package/CHANGELOG.md' /tmp/files.txt
           grep -qx 'package/LICENSE' /tmp/files.txt
-          rm -f pi-output-styles-*.tgz
+          rm -f pi-native-output-styles-*.tgz

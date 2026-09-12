@@ -1,4 +1,7 @@
 import { describe, test, expect } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import outputStyles, {
   parseStyle,
   discoverStyles,
@@ -6,16 +9,13 @@ import outputStyles, {
   writeState,
   resolveActiveName,
   applyStyle,
-  applyStyleReplace,
-  replacePersonalitySection,
   parseStyleCommandArgs,
   bundledStylesDir,
   projectStateFile,
   userStateFile,
   userStylesDir,
   projectStylesDir,
-  ompUserStateFile,
-  ompProjectStateFile,
+  configHome,
   styleCompletions,
   styleHintFor,
   startHintPoller,
@@ -74,10 +74,6 @@ describe("parseStyle", () => {
     expect(s.body).toBe("Body one\r\nBody two");
   });
 });
-
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 function tmpStylesDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "pos-styles-"));
@@ -147,29 +143,18 @@ describe("resolveActiveName", () => {
     expect(resolveActiveName(null, {}, { active: "p" })).toBe("p");
     expect(resolveActiveName(null, {}, {})).toBe(null);
   });
-
-  test("walks the whole state chain in order (pi user > pi project > omp user > omp project)", () => {
-    const chain = [{ active: "pi-user" }, { active: "pi-project" }, { active: "omp-user" }, { active: "omp-project" }];
-    expect(resolveActiveName(null, ...chain)).toBe("pi-user");
-    expect(resolveActiveName(null, ...chain.slice(1))).toBe("pi-project");
-    expect(resolveActiveName(null, ...chain.slice(2))).toBe("omp-user");
-    expect(resolveActiveName(null, ...chain.slice(3))).toBe("omp-project");
-    expect(resolveActiveName("session", ...chain)).toBe("session");
-  });
 });
 
-describe("pi-native locations", () => {
-  test("user and project paths resolve under .pi", () => {
+describe("paths", () => {
+  test("user and project locations resolve under .pi", () => {
     const cwd = mkdtempSync(join(tmpdir(), "pos-pi-"));
     const home = mkdtempSync(join(tmpdir(), "pos-pihome-"));
     process.env.PI_OUTPUT_STYLES_HOME = home;
+    expect(configHome()).toBe(home);
     expect(userStylesDir()).toBe(join(home, "output-styles"));
     expect(userStateFile()).toBe(join(home, "output-styles.json"));
     expect(projectStylesDir(cwd)).toBe(join(cwd, ".pi", "output-styles"));
     expect(projectStateFile(cwd)).toBe(join(cwd, ".pi", "output-styles.json"));
-    // OMP names are unchanged so existing OMP defaults still resolve.
-    expect(ompUserStateFile().endsWith(join(".omp", "agent", "pi-output-styles.json"))).toBe(true);
-    expect(ompProjectStateFile(cwd)).toBe(join(cwd, ".omp", "pi-output-styles.json"));
   });
 
   test("PI_CODING_AGENT_DIR sets the user root when PI_OUTPUT_STYLES_HOME is unset", () => {
@@ -190,181 +175,33 @@ describe("pi-native locations", () => {
 });
 
 describe("applyStyle", () => {
-  const style = { name: "teacher", description: "", body: "Teach clearly." };
-
-  test("appends exactly one marked block preserving base order", () => {
-    const out = applyStyle(["A", "B"], style);
-    expect(out.length).toBe(3);
-    expect(out.slice(0, 2)).toEqual(["A", "B"]);
-    expect(out[2]).toBe("<!-- pi-output-styles:teacher -->\nTeach clearly.");
-  });
-
-  test("coerces undefined base to empty array", () => {
-    const out = applyStyle(undefined, style);
-    expect(out).toEqual(["<!-- pi-output-styles:teacher -->\nTeach clearly."]);
-  });
-
-  test("is idempotent when a marker block is already present", () => {
-    const once = applyStyle(["BASE"], style);
-    const twice = applyStyle(once, style);
-    expect(twice).toEqual(once);
-  });
-
-  test("does not append a second block when switching styles mid-prompt", () => {
-    const other = { name: "concise", description: "", body: "Be brief." };
-    const once = applyStyle(["BASE"], style);
-    expect(applyStyle(once, other)).toEqual(once);
-  });
-
-  test("coerces a non-array base to empty", () => {
-    // @ts-expect-error — exercising the runtime Array.isArray guard against a non-array
-    expect(applyStyle(null, style)).toEqual(["<!-- pi-output-styles:teacher -->\nTeach clearly."]);
-  });
-});
-
-const OMP_DEFAULT = [
-  [
-    "§ Role",
-    "Helpful, trusted assistant for load-bearing changes.",
-    "",
-    "# Engineering",
-    "- Correctness first.",
-    "",
-    "# Personality",
-    "Evidence-first terse engineer: every sentence fact, decision, or risk.",
-    "",
-    "# Tone",
-    "- Fragments when clearer; no ceremony.",
-    "",
-    "§ Runtime",
-    "# Skills & Rules",
-    "- Matching skill → MUST read skill:// first.",
-    "# Tool Inventory",
-    "- `read`",
-  ].join("\n"),
-  "PROJECT: cwd and repo context. Keep this.",
-];
-
-describe("replacePersonalitySection", () => {
-  test("swaps the personality slot and stops at the next § heading", () => {
-    const { text, swapped } = replacePersonalitySection(OMP_DEFAULT[0], "BE A KID.");
-    expect(swapped).toBe(true);
-    expect(text).toContain("# Personality\nBE A KID.");
-    expect(text).not.toContain("Evidence-first terse engineer");
-    expect(text).not.toContain("# Tone");
-    expect(text).toContain("§ Role");
-    expect(text).toContain("# Engineering");
-    expect(text).toContain("\n\n§ Runtime");
-    expect(text).toContain("`read`");
-  });
-
-  test("does not treat $ sequences in the style body as replace tokens", () => {
-    const { text } = replacePersonalitySection(OMP_DEFAULT[0], "Prefix with $& always. Use $$x^2$$.");
-    expect(text).toContain("Prefix with $& always. Use $$x^2$$.");
-    expect(text).not.toContain("Evidence-first terse engineer");
-    expect(text).not.toContain("# Tone");
-    expect(text.indexOf("# Personality")).toBeLessThan(text.indexOf("§ Runtime"));
-  });
-
-  test("injects before § Runtime when the personality heading is missing", () => {
-    const custom = "§ Role\nDo the work.\n\n§ Runtime\nTools stay.";
-    const { text, swapped } = replacePersonalitySection(custom, "ELI5");
-    expect(swapped).toBe(false);
-    expect(text).toContain("# Personality\nELI5");
-    expect(text).toContain("§ Role");
-    expect(text.indexOf("# Personality")).toBeLessThan(text.indexOf("§ Runtime"));
-  });
-
-  test("fallback inject keeps a trailing $ in the style body", () => {
-    const custom = "§ Role\nDo the work.\n\n§ Runtime\nTools stay.";
-    const { text } = replacePersonalitySection(custom, "ends with $");
-    expect(text).toContain("# Personality\nends with $");
-    expect(text.indexOf("# Personality")).toBeLessThan(text.indexOf("§ Runtime"));
-    expect(text).toContain("\n§ Runtime\nTools stay.");
-  });
-
-  test("prepends a personality heading when the prompt has no § sections (Pi shape)", () => {
-    const { text, swapped } = replacePersonalitySection("Just a custom SYSTEM.md.", "ELI5");
-    expect(swapped).toBe(false);
-    expect(text).toBe("# Personality\nELI5\n\nJust a custom SYSTEM.md.");
-  });
-});
-
-describe("applyStyleReplace", () => {
   const style = { name: "eli5", description: "", body: "Talk like I'm 5." };
 
-  test("swaps personality in block 0 and leaves later blocks untouched", () => {
-    const out = applyStyleReplace(OMP_DEFAULT, style);
-    expect(out.length).toBe(2);
-    expect(out[0]).toContain("<!-- pi-output-styles:eli5 -->\nTalk like I'm 5.");
-    expect(out[0]).not.toContain("Evidence-first terse engineer");
-    expect(out[0]).not.toContain("# Tone");
-    expect(out[0]).toContain("# Engineering");
-    expect(out[0]).toContain("§ Runtime");
-    expect(out[1]).toBe(OMP_DEFAULT[1]);
+  test("prepends a marked # Personality block above the prompt", () => {
+    const out = applyStyle("You are a coding assistant.", style);
+    expect(out).toBe("# Personality\n<!-- output-styles:eli5 -->\nTalk like I'm 5.\n\nYou are a coding assistant.");
+    expect(out.indexOf("# Personality")).toBe(0);
   });
 
-  test("coerces undefined base to a single marked block", () => {
-    expect(applyStyleReplace(undefined, style)).toEqual(["<!-- pi-output-styles:eli5 -->\nTalk like I'm 5."]);
+  test("leaves an empty prompt as just the marked block", () => {
+    expect(applyStyle("", style)).toBe("<!-- output-styles:eli5 -->\nTalk like I'm 5.");
   });
 
-  test("is idempotent when a marker block is already present", () => {
-    const once = applyStyleReplace(OMP_DEFAULT, style);
-    expect(applyStyleReplace(once, style)).toEqual(once);
+  test("is idempotent when a marker is already present", () => {
+    const once = applyStyle("BASE", style);
+    expect(applyStyle(once, style)).toBe(once);
   });
 
   test("does not apply a second style when a marker is already present", () => {
     const other = { name: "teacher", description: "", body: "Teach." };
-    const once = applyStyleReplace(OMP_DEFAULT, style);
-    expect(applyStyleReplace(once, other)).toEqual(once);
+    expect(applyStyle(applyStyle("BASE", style), other)).toBe(applyStyle("BASE", style));
   });
 
-  test("injects into a custom prompt that has § Runtime but no personality slot", () => {
-    const custom = ["§ Role\nCustom voice.\n\n§ Runtime\nKeep tools."];
-    const out = applyStyleReplace(custom, style);
-    expect(out).toHaveLength(1);
-    expect(out[0]).toContain("§ Role\nCustom voice.");
-    expect(out[0]).toContain("# Personality\n<!-- pi-output-styles:eli5 -->\nTalk like I'm 5.");
-    expect(out[0].indexOf("# Personality")).toBeLessThan(out[0].indexOf("§ Runtime"));
-    expect(out[0]).toContain("§ Runtime\nKeep tools.");
-  });
-
-  test("does not rewrite a later block that quotes # Personality or § Runtime", () => {
-    const quoted = [
-      "From the project README:",
-      "",
-      "# Personality",
-      "Quoted engineer voice that must stay in docs.",
-      "",
-      "§ Runtime",
-      "Quoted tools heading.",
-    ].join("\n");
-    const customBlock0 = "§ Role\nCustom voice.\n\n§ Runtime\nKeep tools.";
-    const out = applyStyleReplace([customBlock0, quoted], style);
-    expect(out[0]).toContain("# Personality\n<!-- pi-output-styles:eli5 -->\nTalk like I'm 5.");
-    expect(out[0]).toContain("§ Role\nCustom voice.");
-    expect(out[1]).toBe(quoted);
-    expect(out[1]).not.toContain("pi-output-styles");
-  });
-});
-
-describe("replace vs append on the same OMP fixture", () => {
-  const style = { name: "eli5", description: "", body: "Talk like I'm 5." };
-
-  test("append keeps the engineer voice; replace removes it", () => {
-    const appended = applyStyle(OMP_DEFAULT, style);
-    expect(appended[0]).toContain("Evidence-first terse engineer");
-    expect(appended[0]).toContain("# Tone");
-    expect(appended.at(-1)).toContain("<!-- pi-output-styles:eli5 -->");
-
-    const replaced = applyStyleReplace(OMP_DEFAULT, style);
-    expect(replaced[0]).not.toContain("Evidence-first terse engineer");
-    expect(replaced[0]).not.toContain("# Tone");
-    expect(replaced[0]).toContain("<!-- pi-output-styles:eli5 -->\nTalk like I'm 5.");
-    expect(replaced[0]).toContain("# Engineering");
-    expect(replaced[0]).toContain("§ Runtime");
-    expect(replaced[1]).toBe(OMP_DEFAULT[1]);
-    expect(replaced).toHaveLength(OMP_DEFAULT.length);
+  test("keeps the original prompt intact below the injected block", () => {
+    const prompt = "You are a coding assistant.\n\nAvailable tools:\n- read\n\nCurrent working directory: /x";
+    const out = applyStyle(prompt, style);
+    expect(out.endsWith(prompt)).toBe(true);
+    expect(out).toContain("- read");
   });
 });
 
@@ -397,27 +234,14 @@ describe("parseStyleCommandArgs", () => {
   });
 });
 
-import { existsSync } from "node:fs";
-
 describe("bundled styles", () => {
   test("bundledStylesDir resolves to the shipped styles directory", () => {
     expect(existsSync(bundledStylesDir())).toBe(true);
   });
 
-  test("all ten starter styles discover with non-empty bodies", () => {
+  test("every starter style discovers with a non-empty body and description", () => {
     const m = discoverStyles([bundledStylesDir()]);
-    for (const name of [
-      "omp-default",
-      "omp-friendly",
-      "omp-pragmatic",
-      "concise",
-      "explanatory",
-      "teacher",
-      "reviewer",
-      "diagrams-first",
-      "ste",
-      "eli5",
-    ]) {
+    for (const name of ["concise", "explanatory", "teacher", "reviewer", "diagrams-first", "ste", "eli5"]) {
       expect(m.has(name)).toBe(true);
       expect(m.get(name)!.body.length).toBeGreaterThan(0);
       expect(m.get(name)!.description.length).toBeGreaterThan(0);
@@ -480,71 +304,52 @@ function harness(cwd: string): { cap: Captured; ctx: FakeCtx } {
   return { cap, ctx };
 }
 
+function freshCwd(prefix: string): string {
+  const cwd = mkdtempSync(join(tmpdir(), prefix));
+  process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), `${prefix}home-`));
+  return cwd;
+}
+
 describe("extension wiring", () => {
   test("no active style → before_agent_start leaves the prompt unchanged", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    const result = await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: ["BASE"] }, ctx);
+    const result = await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx);
     expect(result).toBeUndefined();
   });
 
-  // NOTE: order deliberately deviates from the brief's literal listing.
-  // `sessionActive` is module-level and persists across tests in this file;
-  // "teacher" is a bundled style discoverable from any cwd, so running the
-  // teacher-session test before this one would leave sessionActive="teacher"
-  // and make this test's "no prompt change" expectation false. The brief's
-  // own note permits reordering as long as "no active style" stays first:
-  // "If you reorder tests, keep the 'no active' case first ...". This test
-  // runs while sessionActive is still unset by any prior /style call.
+  // NOTE: order matters. `session` is module-level and persists across tests in
+  // this file, and "teacher" is a bundled style discoverable from any cwd, so
+  // the teacher-session test must run after this "no active style" case.
   test("/style unknown → error notice and no prompt change", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("nope-not-real", ctx);
     expect(cap.notes.some(n => n.type === "error")).toBe(true);
-    const result = await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: ["BASE"] }, ctx);
+    const result = await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx);
     expect(result).toBeUndefined();
   });
 
-  test("/style teacher (session) → hook replaces/injects the teacher block", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+  test("/style teacher (session) → hook prepends the teacher block", async () => {
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher", ctx);
-    const result = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: ["BASE"] },
-      ctx,
-    )) as { systemPrompt: string[] };
-    expect(result.systemPrompt).toHaveLength(1);
-    expect(result.systemPrompt[0]).toContain("BASE");
-    expect(result.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
+    const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
+      systemPrompt: string;
+    };
+    expect(typeof result.systemPrompt).toBe("string");
+    expect(result.systemPrompt).toContain("<!-- output-styles:teacher -->");
+    expect(result.systemPrompt.startsWith("# Personality\n")).toBe(true);
+    expect(result.systemPrompt.endsWith("BASE")).toBe(true);
     expect(cap.notes.some(n => n.type === "info")).toBe(true);
     // Personal-by-default: a bare /style (no --save/--project flag) must not
-    // persist anything to disk — only sessionActive (in-memory) changes.
+    // persist anything to disk — only `session` (in-memory) changes.
     expect(readState(projectStateFile(cwd))).toEqual({});
     expect(readState(userStateFile())).toEqual({});
   });
 
-  test("hook returns a string when Pi passes systemPrompt as a string", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
-    const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher", ctx);
-    const result = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: "BASE\n\n§ Runtime\nKeep tools." },
-      ctx,
-    )) as { systemPrompt: string };
-    expect(typeof result.systemPrompt).toBe("string");
-    expect(result.systemPrompt).toContain("BASE");
-    expect(result.systemPrompt).toContain("<!-- pi-output-styles:teacher -->");
-    expect(result.systemPrompt.indexOf("# Personality")).toBeLessThan(result.systemPrompt.indexOf("§ Runtime"));
-  });
-
-
   test("/style teacher --project persists to the project state file", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher --project", ctx);
     expect(readState(projectStateFile(cwd))).toEqual({ active: "teacher" });
@@ -552,110 +357,84 @@ describe("extension wiring", () => {
   });
 
   test("/style teacher --save persists to the user state file only", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher --save", ctx);
     expect(readState(userStateFile())).toEqual({ active: "teacher" });
     expect(readState(projectStateFile(cwd))).toEqual({});
   });
 
-  // sessionActive is "teacher" here (set by the session-scope test above),
-  // and each harness() call below builds a fresh `cap`, so these tests
-  // observe only their own captured statuses/notes.
+  // `session` is "teacher" here (set by the session-scope test above), and each
+  // harness() call below builds a fresh `cap`, so these tests observe only their
+  // own captured statuses/notes.
   test("session_start sets the status line", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.handlers["session_start"](undefined, ctx);
     expect(cap.statuses).toContain("style: teacher");
   });
 
   test("hasUI:false suppresses status", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     const noUiCtx: FakeCtx = { ...ctx, hasUI: false };
-    await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: ["BASE"] }, noUiCtx);
+    await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, noUiCtx);
     expect(cap.statuses).toEqual([]);
   });
 
   test("/style <unknown> does not clobber the active style", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher", ctx);
-    const first = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: ["BASE"] },
-      ctx,
-    )) as { systemPrompt: string[] };
-    expect(first.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
+    const first = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
+      systemPrompt: string;
+    };
+    expect(first.systemPrompt).toContain("<!-- output-styles:teacher -->");
 
     await cap.commands["style"]("nope-not-real", ctx);
-    const second = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: ["BASE"] },
-      ctx,
-    )) as { systemPrompt: string[] };
-    expect(second.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
+    const second = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
+      systemPrompt: string;
+    };
+    expect(second.systemPrompt).toContain("<!-- output-styles:teacher -->");
   });
 
-  test("/style teacher resolves the project-local .omp definition over the bundled one (legacy OMP layout)", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
-    mkdirSync(join(cwd, ".omp", "output-styles"), { recursive: true });
+  test("/style teacher resolves a .pi/output-styles definition over the bundled one", async () => {
+    const cwd = freshCwd("pos-wire-");
+    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
     writeFileSync(
-      join(cwd, ".omp", "output-styles", "teacher.md"),
+      join(cwd, ".pi", "output-styles", "teacher.md"),
       "---\nname: teacher\ndescription: local\n---\nPROJECT-OVERRIDE-BODY",
     );
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher", ctx);
-    const result = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: ["BASE"] },
-      ctx,
-    )) as { systemPrompt: string[] };
-    expect(result.systemPrompt[0]).toContain("PROJECT-OVERRIDE-BODY");
+    const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
+      systemPrompt: string;
+    };
+    expect(result.systemPrompt).toContain("PROJECT-OVERRIDE-BODY");
   });
 
-  test("/style teacher finds .pi/output-styles and wins over .omp", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
-    mkdirSync(join(cwd, ".omp", "output-styles"), { recursive: true });
-    writeFileSync(join(cwd, ".omp", "output-styles", "teacher.md"), "---\nname: teacher\n---\nOMP-BODY");
-    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "output-styles", "teacher.md"), "---\nname: teacher\n---\nPI-BODY");
-    const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher", ctx);
-    const result = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: ["BASE"] },
-      ctx,
-    )) as { systemPrompt: string[] };
-    expect(result.systemPrompt[0]).toContain("PI-BODY");
-    expect(result.systemPrompt[0]).not.toContain("OMP-BODY");
-    expect(result.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
-  });
-
-  test("a .pi/output-styles.json project default beats a .omp one", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
-    mkdirSync(join(cwd, ".omp"), { recursive: true });
-    writeFileSync(join(cwd, ".omp", "pi-output-styles.json"), JSON.stringify({ active: "concise" }));
+  test("a .pi/output-styles.json project default activates a style with no /style call", async () => {
+    const cwd = freshCwd("pos-wire-");
     writeState(projectStateFile(cwd), { active: "teacher" });
     expect(resolveActiveStyle(cwd)?.name).toBe("teacher");
+    const { cap, ctx } = harness(cwd);
+    const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
+      systemPrompt: string;
+    };
+    expect(result.systemPrompt).toContain("<!-- output-styles:teacher -->");
   });
 
-  test("before_agent_start never throws even if applyStyleReplace would (malformed base)", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+  test("before_agent_start never throws even when the event is malformed", async () => {
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher", ctx);
-    const malformedEvent = { prompt: "hi", systemPrompt: ["ok", 42] };
+    const malformedEvent = { prompt: "hi", systemPrompt: 42 };
     const result = await cap.handlers["before_agent_start"](malformedEvent, ctx);
     expect(result).toBeUndefined();
   });
 
   test("/style teacher --project notifies a warning and does not throw when saving fails", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     writeFileSync(join(cwd, ".pi"), "not a directory");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher --project", ctx);
@@ -663,21 +442,18 @@ describe("extension wiring", () => {
   });
 
   test("/style teacher --saev warns about the unknown flag and still applies teacher", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher --saev", ctx);
     expect(cap.notes.some(n => n.type === "warning" && n.message.includes("--saev"))).toBe(true);
-    const result = (await cap.handlers["before_agent_start"](
-      { prompt: "hi", systemPrompt: ["BASE"] },
-      ctx,
-    )) as { systemPrompt: string[] };
-    expect(result.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
+    const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
+      systemPrompt: string;
+    };
+    expect(result.systemPrompt).toContain("<!-- output-styles:teacher -->");
   });
 
   test("/style (no args) lists styles with their descriptions", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("", ctx);
     const info = cap.notes.find(n => n.type === "info");
@@ -685,8 +461,7 @@ describe("extension wiring", () => {
   });
 
   test("/style off overrides a saved default and clears the session", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     writeState(userStateFile(), { active: "teacher" }); // a saved default exists
     await cap.commands["style"]("teacher", ctx);
@@ -697,8 +472,7 @@ describe("extension wiring", () => {
   });
 
   test("/style none is an alias for off", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     writeState(userStateFile(), { active: "teacher" });
     await cap.commands["style"]("none", ctx);
@@ -706,8 +480,7 @@ describe("extension wiring", () => {
   });
 
   test("/style off --save clears the saved user default", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     writeState(userStateFile(), { active: "teacher" });
     await cap.commands["style"]("off --save", ctx);
@@ -716,35 +489,26 @@ describe("extension wiring", () => {
 });
 
 describe("styleCompletions", () => {
-  const freshCwd = () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-comp-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
-    return cwd;
-  };
-
   test("completes bundled style names filtered by prefix, with descriptions", () => {
-    const items = styleCompletions("te", freshCwd())!;
+    const items = styleCompletions("te", freshCwd("pos-comp-"))!;
     expect(items.map(i => i.value)).toEqual(["teacher"]);
     expect(items[0].label).toBe("teacher");
     expect(items[0].description!.length).toBeGreaterThan(0);
   });
 
   test("advertises the persist flags as a hint on every item", () => {
-    const items = styleCompletions("", freshCwd())!;
+    const items = styleCompletions("", freshCwd("pos-comp-"))!;
     expect(items.length).toBeGreaterThan(0);
     for (const item of items) expect(item.hint).toBe("[--save] [--project]");
   });
 
-  test("empty prefix returns all bundled styles, sorted", () => {
-    const items = styleCompletions("", freshCwd())!;
+  test("empty prefix returns all bundled styles plus off, sorted", () => {
+    const items = styleCompletions("", freshCwd("pos-comp-"))!;
     expect(items.map(i => i.value)).toEqual([
       "concise",
       "diagrams-first",
       "eli5",
       "explanatory",
-      "omp-default",
-      "omp-friendly",
-      "omp-pragmatic",
       "reviewer",
       "ste",
       "teacher",
@@ -753,21 +517,21 @@ describe("styleCompletions", () => {
   });
 
   test("returns null once a space is present (name already typed)", () => {
-    expect(styleCompletions("teacher ", freshCwd())).toBe(null);
+    expect(styleCompletions("teacher ", freshCwd("pos-comp-"))).toBe(null);
   });
 
   test("returns null when nothing matches", () => {
-    expect(styleCompletions("zzz", freshCwd())).toBe(null);
+    expect(styleCompletions("zzz", freshCwd("pos-comp-"))).toBe(null);
   });
 
   test("offers 'off' to clear the active style", () => {
-    expect(styleCompletions("of", freshCwd())!.map(i => i.value)).toEqual(["off"]);
+    expect(styleCompletions("of", freshCwd("pos-comp-"))!.map(i => i.value)).toEqual(["off"]);
   });
 
   test("offers a project style and can shadow a bundled name", () => {
-    const cwd = freshCwd();
-    mkdirSync(join(cwd, ".omp", "output-styles"), { recursive: true });
-    writeFileSync(join(cwd, ".omp", "output-styles", "custom.md"), "---\nname: custom\ndescription: mine\n---\nX");
+    const cwd = freshCwd("pos-comp-");
+    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "output-styles", "custom.md"), "---\nname: custom\ndescription: mine\n---\nX");
     expect(styleCompletions("cu", cwd)!.map(i => i.value)).toEqual(["custom"]);
   });
 });
@@ -791,9 +555,7 @@ describe("styleHintFor", () => {
 
 describe("startHintPoller", () => {
   test("shows the flag widget while /style is composed, then clears it", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "pos-poll-"));
-    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-poll-home-"));
-    const { cap, ctx } = harness(cwd);
+    const { cap, ctx } = harness(freshCwd("pos-poll-"));
     startHintPoller(ctx);
     expect(cap.timers).toHaveLength(1);
 
@@ -802,7 +564,7 @@ describe("startHintPoller", () => {
     expect(cap.widgets).toEqual([]);
     cap.timers[0](); // tick 2: stable → widget shown
     expect(cap.widgets).toHaveLength(1);
-    expect(cap.widgets[0].key).toBe("pi-output-styles-hint");
+    expect(cap.widgets[0].key).toBe("output-styles-hint");
     expect(cap.widgets[0].lines!.join("\n")).toContain("--save");
     expect(cap.widgets[0].lines!.join("\n")).toContain("--project");
 

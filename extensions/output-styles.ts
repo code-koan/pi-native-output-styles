@@ -1,7 +1,6 @@
-// pi-output-styles — named system-prompt styles for OMP/Pi.
-// applyStyle = append (kept for tests). applyStyleReplace = swap the OMP
-// personality slot and keep tools/rules. The hook uses replace.
-// Pure helpers are exported for unit testing.
+// pi-native-output-styles — named, swappable system-prompt styles for Pi.
+// The active style is injected as a `# Personality` block at the top of the
+// system prompt each turn. Pure helpers are exported for unit testing.
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -32,11 +31,11 @@ interface ExtensionContext {
 
 interface BeforeAgentStartEvent {
   prompt: string;
-  systemPrompt?: string[] | string;
+  systemPrompt: string;
 }
 
 interface BeforeAgentStartResult {
-  systemPrompt?: string[] | string;
+  systemPrompt?: string;
 }
 
 interface AutocompleteItem {
@@ -106,33 +105,19 @@ export function discoverStyles(dirsLowToHigh: string[]): Map<string, Style> {
   return styles;
 }
 
-// Pi-native config roots come first: `PI_CODING_AGENT_DIR` (default
-// `~/.pi/agent`) for user scope and `<repo>/.pi` for project scope. Oh My Pi's
-// `~/.omp/agent` and `<repo>/.omp` stay supported at lower precedence, so one
-// install serves both harnesses.
-// `PI_OUTPUT_STYLES_HOME` overrides the Pi user root.
-export function piConfigHome(): string {
+// Pi config roots: `PI_CODING_AGENT_DIR` (default `~/.pi/agent`) for user scope
+// and `<repo>/.pi` for project scope. `PI_OUTPUT_STYLES_HOME` overrides the
+// user root and takes precedence over `PI_CODING_AGENT_DIR`.
+export function configHome(): string {
   return process.env.PI_OUTPUT_STYLES_HOME || process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }
 
-export function ompConfigHome(): string {
-  return join(homedir(), ".omp", "agent");
-}
-
 export function userStylesDir(): string {
-  return join(piConfigHome(), "output-styles");
+  return join(configHome(), "output-styles");
 }
 
 export function projectStylesDir(cwd: string): string {
   return join(cwd, ".pi", "output-styles");
-}
-
-export function ompUserStylesDir(): string {
-  return join(ompConfigHome(), "output-styles");
-}
-
-export function ompProjectStylesDir(cwd: string): string {
-  return join(cwd, ".omp", "output-styles");
 }
 
 export function bundledStylesDir(): string {
@@ -161,79 +146,36 @@ export function writeState(file: string, state: StyleState): void {
 }
 
 export function userStateFile(): string {
-  return join(piConfigHome(), "output-styles.json");
+  return join(configHome(), "output-styles.json");
 }
 
 export function projectStateFile(cwd: string): string {
   return join(cwd, ".pi", "output-styles.json");
 }
 
-// OMP state filenames keep their original name so existing OMP defaults still
-// resolve after upgrading.
-export function ompUserStateFile(): string {
-  return join(ompConfigHome(), "pi-output-styles.json");
+// Session selection beats the user default, which beats the project default.
+export function resolveActiveName(
+  sessionActive: string | null,
+  userState: StyleState,
+  projectState: StyleState,
+): string | null {
+  return sessionActive ?? userState.active ?? projectState.active ?? null;
 }
 
-export function ompProjectStateFile(cwd: string): string {
-  return join(cwd, ".omp", "pi-output-styles.json");
-}
-
-// Ordered state chain: session beats the first saved default that sets one.
-export function resolveActiveName(sessionActive: string | null, ...states: StyleState[]): string | null {
-  return sessionActive ?? states.map(s => s.active).find((a): a is string => typeof a === "string") ?? null;
-}
-
-const MARKER_PREFIX = "<!-- pi-output-styles:";
+const MARKER_PREFIX = "<!-- output-styles:";
 
 export function styleMarker(style: Style): string {
   return `${MARKER_PREFIX}${style.name} -->\n${style.body}`;
 }
 
-export function applyStyle(baseBlocks: string[] | undefined, style: Style): string[] {
-  const base = Array.isArray(baseBlocks) ? baseBlocks : [];
-  if (base.some(b => b.includes(MARKER_PREFIX))) return base;
-  return [...base, styleMarker(style)];
-}
-
-// OMP default template (system-prompt.md) inlines personality as:
-//   # Personality
-//   <preset>
-//   § Runtime
-// Nested # Tone / # Reasoning headings sit inside that slot. The next `§ `
-// heading (usually `§ Runtime`) is the hard stop. Custom SYSTEM.md omits the
-// slot; we then inject before `§ Runtime`, else before any `§ ` that is not
-// `§ Role`, else append — always inside block 0. We never delete tools,
-// skills, or safety blocks.
-// /m makes $ end-of-line; (?![\s\S]) is true EOF so # Tone inside the slot is consumed.
-const PERSONALITY_SECTION = /^# Personality[ \t]*(?:\r?\n)[\s\S]*?(?=\r?\n\r?\n§ |\r?\n§ |(?![\s\S]))/m;
-
-export function replacePersonalitySection(text: string, inner: string): { text: string; swapped: boolean } {
-  if (PERSONALITY_SECTION.test(text)) {
-    return { text: text.replace(PERSONALITY_SECTION, () => `# Personality\n${inner}`), swapped: true };
-  }
-  const beforeRuntime = text.replace(/(\r?\n)§ Runtime\b/, (_m, nl: string) => `\n\n# Personality\n${inner}${nl}§ Runtime`);
-  if (beforeRuntime !== text) return { text: beforeRuntime, swapped: false };
-  const beforeOther = text.replace(/(\r?\n)§ (?!Role\b)/, (_m, nl: string) => `\n\n# Personality\n${inner}${nl}§ `);
-  if (beforeOther !== text) return { text: beforeOther, swapped: false };
-  // Pi's assembled prompt has no personality slot and no § sections at all
-  // (flat prose plus XML blocks), and a custom SYSTEM.md looks the same. Put
-  // the persona first, the way Claude Code output styles do, rather than
-  // after the tool list and cwd line.
-  return { text: `# Personality\n${inner}\n\n${text}`, swapped: false };
-}
-
-// Personality lives in block 0 of OMP's rebuilt-per-turn systemPrompt.
-// Later blocks are project context / README and may quote `# Personality`
-// or `§ Runtime` in prose — never scan them.
-export function applyStyleReplace(baseBlocks: string[] | undefined, style: Style): string[] {
-  const base = Array.isArray(baseBlocks) ? baseBlocks : [];
-  if (base.some(b => b.includes(MARKER_PREFIX))) return base;
+// Pi's assembled system prompt is flat prose plus XML blocks — it has no
+// personality slot. So the style becomes one, prepended to the top the way
+// Claude Code output styles are, rather than appended after the tool list and
+// cwd line. Idempotent: a prompt that already carries a marker is returned as-is.
+export function applyStyle(systemPrompt: string, style: Style): string {
+  if (systemPrompt.includes(MARKER_PREFIX)) return systemPrompt;
   const marked = styleMarker(style);
-  if (base.length === 0) return [marked];
-
-  const out = base.slice();
-  out[0] = replacePersonalitySection(out[0], marked).text;
-  return out;
+  return systemPrompt.length === 0 ? marked : `# Personality\n${marked}\n\n${systemPrompt}`;
 }
 
 export type PersistScope = "none" | "user" | "project";
@@ -265,10 +207,10 @@ export function parseStyleCommandArgs(args: string): StyleCommandArgs {
   return { name, persist };
 }
 
-const STATUS_KEY = "pi-output-styles";
-const HINT_KEY = "pi-output-styles-hint";
+const STATUS_KEY = "output-styles";
+const HINT_KEY = "output-styles-hint";
 // Persistent ghost hint shown below the editor while a `/style` command is
-// being composed. OMP only renders inline usage ghost text for builtin
+// being composed. Pi only renders inline usage ghost text for builtin
 // commands, so this widget carries the same message for extension commands.
 const STYLE_HINT_LINES = [
   "/style <name|off> [--save] [--project]",
@@ -311,21 +253,15 @@ export function startHintPoller(ctx: ExtensionContext): void {
 
 // Session-active style selection is process-global (module-level) state.
 // This assumes one module instance per session/cwd, which holds under
-// today's per-session extension loading. If OMP ever shares one module
+// today's per-session extension loading. If Pi ever shares one module
 // instance across multiple concurrent sessions, switch this to a
 // cwd-keyed Map instead of a single variable.
 type SessionSelection = { type: "inherit" } | { type: "off" } | { type: "style"; name: string };
 let session: SessionSelection = { type: "inherit" };
 
 function styleDirs(cwd: string): string[] {
-  // low → high precedence: bundled < OMP user < OMP project < Pi user < Pi project
-  return [
-    bundledStylesDir(),
-    ompUserStylesDir(),
-    ompProjectStylesDir(cwd),
-    userStylesDir(),
-    projectStylesDir(cwd),
-  ];
+  // low → high precedence: bundled < user < project
+  return [bundledStylesDir(), userStylesDir(), projectStylesDir(cwd)];
 }
 
 // Argument completions for `/style <name>`: matches style names by prefix.
@@ -355,13 +291,7 @@ export function styleCompletions(argumentPrefix: string, cwd: string): Autocompl
 export function resolveActiveStyle(cwd: string, styles?: Map<string, Style>): Style | null {
   if (session.type === "off") return null;
   const sessionActive = session.type === "style" ? session.name : null;
-  const name = resolveActiveName(
-    sessionActive,
-    readState(userStateFile()),
-    readState(projectStateFile(cwd)),
-    readState(ompUserStateFile()),
-    readState(ompProjectStateFile(cwd)),
-  );
+  const name = resolveActiveName(sessionActive, readState(userStateFile()), readState(projectStateFile(cwd)));
   if (!name) return null;
   const map = styles ?? discoverStyles(styleDirs(cwd));
   return map.get(name) ?? null;
@@ -391,18 +321,12 @@ export default function outputStyles(pi: ExtensionAPI): void {
         refreshStatus(ctx, null);
         return;
       }
-      // Apply first; only reflect the style in the status line once the
-      // prompt was actually augmented, so a swallowed throw never advertises
-      // a style the turn did not apply.
-      // OMP: systemPrompt is string[]. Pi: a single string. Return the same shape.
-      const incoming = event.systemPrompt;
-      const systemPrompt =
-        typeof incoming === "string"
-          ? (applyStyleReplace([incoming], style)[0] ?? styleMarker(style))
-          : applyStyleReplace(incoming, style);
-      const result = { systemPrompt };
+      // Apply first; only reflect the style in the status line once the prompt
+      // was actually augmented, so a swallowed throw never advertises a style
+      // the turn did not apply.
+      const systemPrompt = applyStyle(event.systemPrompt ?? "", style);
       refreshStatus(ctx, style);
-      return result;
+      return { systemPrompt };
     } catch {
       return; // never fail a turn over a styling concern
     }
@@ -410,7 +334,7 @@ export default function outputStyles(pi: ExtensionAPI): void {
 
   pi.registerCommand("style", {
     description:
-      "Select an output style (replaces the personality slot, or is injected when the prompt has none), or clear it. Usage: /style [name|off] [--save] [--project]",
+      "Select an output style (injected as the # Personality block of the system prompt), or clear it. Usage: /style [name|off] [--save] [--project]",
     getArgumentCompletions: argumentPrefix => styleCompletions(argumentPrefix, process.cwd()),
     handler: (args, ctx) => {
       const { name, persist } = parseStyleCommandArgs(args);

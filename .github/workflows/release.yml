@@ -1,0 +1,33 @@
+name: Release
+
+# Publishes to npm when a GitHub Release is published, or on demand from the
+# Actions tab. Tag the release with the version after bumping "version" in
+# package.json.
+#
+# Auth uses the NPM_TOKEN repository secret (an npm automation/granular token
+# with publish rights for pi-native-output-styles).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
