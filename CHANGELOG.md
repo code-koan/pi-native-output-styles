@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+One command, plus a bundled style and an agent that maintains styles.
+
+### Added
+
+- `/output-style <request>` hands the task to an agent that reviews, rewrites, or creates styles. The brief is short Markdown in `extensions/prompts/output-style-leader.md`, and the agent decides for itself whether to fan work out to other agents.
+- Bundled `caveman` style, from [carlosduplar/caveman-output-style-claude-code](https://github.com/carlosduplar/caveman-output-style-claude-code) (MIT, © 2026 Carlos Mello).
+
+### Changed
+
+- **`/style` is gone; `/output-style` is the only command.** A single word that names a style, `off`, or `none` is style management; anything else is a request for the agent. `/output-style` with no arguments lists what exists.
+- Style names are matched case-insensitively and resolved to their declared name.
+
 ## 0.4.0
 
 Repackaged as `pi-native-output-styles` — a Pi-only output-style switcher built on Pi's native `.pi/` directories.

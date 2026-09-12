@@ -4,7 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/pi-native-output-styles.svg)](https://www.npmjs.com/package/pi-native-output-styles)
 [![license](https://img.shields.io/npm/l/pi-native-output-styles.svg)](./LICENSE)
 
-Named, swappable system-prompt styles for [Pi](https://pi.dev) — with a live `/style` switcher. Unlike Claude Code's output styles (which need `/clear` to switch), styles here apply and switch **live, mid-session**.
+Named, swappable system-prompt styles for [Pi](https://pi.dev), plus an agent that can review, rewrite, and create them for you. Unlike Claude Code's output styles (which need `/clear` to switch), styles here apply and switch **live, mid-session**.
 
 Styles and saved defaults live in Pi's own directories: `~/.pi/agent/output-styles/` and `<repo>/.pi/output-styles/`.
 
@@ -19,17 +19,31 @@ pi install git:github.com/code-koan/pi-native-output-styles
 
 Then start a **new** session. Extensions do not hot-reload.
 
-## Use
+## One command
 
-- `/style` — show the active style and list the available ones.
-- `/style <name>` — activate a style for this session.
-- `/style <name> --save` — also save it as your personal (user) default.
-- `/style <name> --project` — save it as the project default (committed with the repo).
-- `/style off` — clear the active style for this session, overriding any saved default.
-- `/style off --save` / `/style off --project` — also clear the saved default. `none` is an alias for `off`.
-- While composing `/style`, a hint line below the input shows the available flags.
+`/output-style` does both jobs. What you type decides which one you get.
 
-The style is applied every turn, and the status line shows `style: eli5`.
+**Switch styles** — the first word is a style name, `off`, or nothing:
+
+```text
+/output-style                          list styles and show the active one
+/output-style caveman                  use caveman for this session
+/output-style concise --save           and make it your default
+/output-style concise --project        save it as this project's default
+/output-style off                      clear it; --save / --project also clears the default
+```
+
+**Ask the agent to work on a style** — anything else:
+
+```text
+/output-style review the reviewer style
+/output-style 重写这个 output style，让它更简洁、更适合编程
+/output-style 创建一个适合代码 Review 的 output style
+```
+
+The rule is one line: *a single word that names a style, `off`, or `none` is management; anything else is a request for the agent.* So `/output-style concise` activates, and `/output-style rewrite concise` asks. To review a style whose name you would otherwise activate, say more than its name.
+
+While composing the command, a hint line under the editor shows both forms.
 
 ## How a style is applied
 
@@ -37,9 +51,23 @@ Pi's assembled system prompt is flat prose plus XML blocks — there is no perso
 
 It is idempotent: a prompt that already carries the marker is left untouched, so switching styles mid-session never stacks a second block. Nothing else in the prompt is modified.
 
+## The style agent
+
+`/output-style <request>` hands the task to the agent with a short brief and the live picture: which style is active, both writable directories, and every style that exists with its tier and file path.
+
+The agent owns the task end to end. It decides for itself whether the work needs other agents — a review is the usual case, where prompt quality, responsibility boundaries, and conflicts/redundancy are worth splitting across children. It uses whatever delegation tool the session has, and does the analysis itself when there is none. The final write and the summary stay with it.
+
+Review findings are specific: conflicting instructions, duplicate or unenforceable rules, vague wording, over-constraining the model, content that belongs to a different concern, AI-slop voice, and rules that are hard to follow while actually working. Rewrites keep what works, delete what does not, and add only what is missing.
+
+A review reports; it does not edit. The file is written only when the request asks for a change. In observed runs the agent delegated on its own when a task had several independent angles to check, and worked solo on a small single-file review.
+
+The brief lives in [`extensions/prompts/output-style-leader.md`](extensions/prompts/output-style-leader.md) and is plain Markdown — edit it without touching code.
+
 ## Bundled styles
 
-`concise` · `explanatory` · `teacher` · `reviewer` · `diagrams-first` · `ste` · `eli5`
+`caveman` · `concise` · `explanatory` · `teacher` · `reviewer` · `diagrams-first` · `ste` · `eli5`
+
+`caveman` is [Carlos Mello's Caveman output style](https://github.com/carlosduplar/caveman-output-style-claude-code) — terse replies, no filler, same technical signal. The same repo also ships a more aggressive `caveman-ultra`; it is not bundled, but you can drop it into your own `output-styles/` directory unchanged.
 
 `ste` writes in [ASD-STE100](https://asd-ste100.org) Simplified Technical English, with the v2.0 action-first reply shape for person-addressed replies, tasks, issues, pull request descriptions, and commit messages. Adapted from [Ege Chelebi's ste-writing skill](https://github.com/woosal1337/blog/blob/9240b25eac013467554fd8217f319743aa0282b8/videos/ep01-the-cure-for-ai-slop/asd-ste100/SKILL.md).
 
@@ -60,12 +88,12 @@ description: Teach as you go
 Act as a patient teacher. Explain the concept before applying it.
 ```
 
-The body becomes the `# Personality` block.
+`name` is lowercase kebab-case, `description` is one line and shows up in `/output-style`.
 
 Precedence:
 
 - **Definitions** (low → high): bundled < user < project.
-- **Which style is active**: session `/style` > user default > project default.
+- **Which style is active**: session `/output-style` > user default > project default.
 
 ## Config
 
@@ -91,4 +119,4 @@ bun x tsc --noEmit
 
 ## Credits
 
-Started as a fork of [LoneExile/pi-output-styles](https://github.com/LoneExile/pi-output-styles), reworked to use Pi's native `.pi/` directories. MIT licensed; original work © 2026 LoneExile.
+Started as a fork of [LoneExile/pi-output-styles](https://github.com/LoneExile/pi-output-styles). Bundles [caveman](https://github.com/carlosduplar/caveman-output-style-claude-code) by Carlos Mello. MIT licensed; original work © 2026 LoneExile, caveman style © 2026 Carlos Mello.

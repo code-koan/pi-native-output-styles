@@ -1,6 +1,6 @@
 {
   "name": "pi-native-output-styles",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Named, swappable system-prompt styles for Pi — live /style switcher with native .pi/ directory support.",
   "keywords": [
     "pi-package",

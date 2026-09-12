@@ -11,6 +11,21 @@ export interface Style {
   name: string;
   description: string;
   body: string;
+  /** Absolute file path; set by discoverStyles. */
+  path?: string;
+}
+
+/** Where a style definition was found. Only `project` and `user` are writable. */
+export type StyleTier = "bundled" | "user" | "project";
+
+export interface StyleSource {
+  dir: string;
+  tier: StyleTier;
+}
+
+export interface StyleEntry extends Style {
+  tier: StyleTier;
+  path: string;
 }
 
 type NotifyType = "info" | "warning" | "error";
@@ -25,6 +40,7 @@ interface ExtensionUI {
 interface ExtensionContext {
   cwd: string;
   hasUI: boolean;
+  isIdle?(): boolean;
   ui: ExtensionUI;
   setInterval?(callback: () => void, ms?: number): unknown;
 }
@@ -59,6 +75,7 @@ interface ExtensionAPI {
       handler: (args: string, ctx: ExtensionContext) => void | Promise<void>;
     },
   ): void;
+  sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
 }
 
 export function parseStyle(text: string, fallbackName: string): Style {
@@ -99,7 +116,7 @@ export function discoverStyles(dirsLowToHigh: string[]): Map<string, Style> {
       }
       const style = parseStyle(text, entry.slice(0, -3));
       if (style.body.length === 0) continue;
-      styles.set(style.name, style);
+      styles.set(style.name, { ...style, path: join(dir, entry) });
     }
   }
   return styles;
@@ -207,20 +224,46 @@ export function parseStyleCommandArgs(args: string): StyleCommandArgs {
   return { name, persist };
 }
 
+// One command serves both jobs, so the split has to be guessable from the
+// words alone. Rule: the request is style management only when it is empty,
+// or its single non-flag word is `off`/`none` or a style that exists. Anything
+// else is a task for the agent. `/output-style concise` activates; `/output-style
+// rewrite concise` asks the agent.
+export type StyleCommandRoute = { kind: "manage" } | { kind: "task"; request: string };
+
+export function routeStyleCommand(args: string, styleNames: Iterable<string>): StyleCommandRoute {
+  const request = args.trim();
+  if (request.length === 0) return { kind: "manage" };
+  const words = request.split(/\s+/).filter(t => t.length > 0 && !t.startsWith("--"));
+  if (words.length === 0) return { kind: "manage" }; // flags only
+  if (words.length > 1) return { kind: "task", request };
+  const word = words[0].toLowerCase();
+  if (OFF_WORDS[word]) return { kind: "manage" };
+  const known = new Set([...styleNames].map(n => n.toLowerCase()));
+  return known.has(word) ? { kind: "manage" } : { kind: "task", request };
+}
+
+// Routing matches names case-insensitively, but the style map is keyed by the
+// exact declared name, so the selected name has to be canonicalised before use.
+export function resolveStyleName(name: string, styleNames: Iterable<string>): string | null {
+  const all = [...styleNames];
+  return all.find(n => n === name) ?? all.find(n => n.toLowerCase() === name.toLowerCase()) ?? null;
+}
+
 const STATUS_KEY = "output-styles";
 const HINT_KEY = "output-styles-hint";
-// Persistent ghost hint shown below the editor while a `/style` command is
-// being composed. Pi only renders inline usage ghost text for builtin
-// commands, so this widget carries the same message for extension commands.
+// Persistent ghost hint shown below the editor while `/output-style` is being
+// composed. Pi only renders inline usage ghost text for builtin commands, so
+// this widget carries the same message for extension commands.
 const STYLE_HINT_LINES = [
-  "/style <name|off> [--save] [--project]",
-  "persist: --save (user default, --global alias) · --project (this project)",
+  "/output-style <name|off> [--save] [--project]",
+  "/output-style <ask the agent to review, rewrite, or create a style>",
 ];
 
-// Pure matcher for the widget: show the hint while the input starts with a
-// `/style` command word (line start, with optional leading whitespace).
+// Pure matcher for the widget: show the hint while the input starts with the
+// `/output-style` command word (line start, optional leading whitespace).
 export function styleHintFor(text: string): string[] | null {
-  return /^\s*\/style(?:\s|$)/.test(text) ? STYLE_HINT_LINES : null;
+  return /^\s*\/output-style(?:\s|$)/.test(text) ? STYLE_HINT_LINES : null;
 }
 
 // Poller state: one started flag guards re-registration across in-process
@@ -259,9 +302,29 @@ export function startHintPoller(ctx: ExtensionContext): void {
 type SessionSelection = { type: "inherit" } | { type: "off" } | { type: "style"; name: string };
 let session: SessionSelection = { type: "inherit" };
 
-function styleDirs(cwd: string): string[] {
+export function styleSources(cwd: string): StyleSource[] {
   // low → high precedence: bundled < user < project
-  return [bundledStylesDir(), userStylesDir(), projectStylesDir(cwd)];
+  return [
+    { dir: bundledStylesDir(), tier: "bundled" },
+    { dir: userStylesDir(), tier: "user" },
+    { dir: projectStylesDir(cwd), tier: "project" },
+  ];
+}
+
+// One row per style name: the winning definition plus the file that actually
+// produced it, so a rewrite knows whether it may edit in place.
+export function styleCatalog(cwd: string): StyleEntry[] {
+  const byName = new Map<string, StyleEntry>();
+  for (const { dir, tier } of styleSources(cwd)) {
+    for (const style of discoverStyles([dir]).values()) {
+      if (style.path) byName.set(style.name, { ...style, tier, path: style.path });
+    }
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function styleDirs(cwd: string): string[] {
+  return styleSources(cwd).map(s => s.dir);
 }
 
 // Argument completions for `/style <name>`: matches style names by prefix.
@@ -302,6 +365,37 @@ function refreshStatus(ctx: ExtensionContext, style: Style | null): void {
   ctx.ui.setStatus(STATUS_KEY, style ? `style: ${style.name}` : undefined);
 }
 
+// The Leader brief is plain Markdown next to the extension, so its wording can
+// be edited without touching code.
+export function leaderBrief(): string {
+  return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "prompts", "output-style-leader.md"), "utf8").trim();
+}
+
+// The brief stays fixed and short. What changes per run is the live picture:
+// which style is active, where styles may be written, and what already exists.
+// The user's words are passed through untouched — this is a router, not a form.
+export function buildStyleTask(brief: string, cwd: string, active: Style | null, request: string): string {
+  const catalog = styleCatalog(cwd);
+  return [
+    brief,
+    "",
+    "## Context",
+    "",
+    `Active style: ${active?.name ?? "(none)"}`,
+    `Project style dir: ${projectStylesDir(cwd)}`,
+    `User style dir: ${userStylesDir()}`,
+    "",
+    "Available styles:",
+    ...(catalog.length
+      ? catalog.map(s => `- ${s.name} [${s.tier}] ${s.path}${s.description ? ` — ${s.description}` : ""}`)
+      : ["(none)"]),
+    "",
+    "## Request",
+    "",
+    request,
+  ].join("\n");
+}
+
 export default function outputStyles(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     refreshStatus(ctx, resolveActiveStyle(ctx.cwd));
@@ -332,13 +426,30 @@ export default function outputStyles(pi: ExtensionAPI): void {
     }
   });
 
-  pi.registerCommand("style", {
+  pi.registerCommand("output-style", {
     description:
-      "Select an output style (injected as the # Personality block of the system prompt), or clear it. Usage: /style [name|off] [--save] [--project]",
+      "Select an output style, or ask the agent to review, rewrite, or create one. Usage: /output-style <name|off|what you want> [--save] [--project]",
     getArgumentCompletions: argumentPrefix => styleCompletions(argumentPrefix, process.cwd()),
     handler: (args, ctx) => {
-      const { name, persist } = parseStyleCommandArgs(args);
       const styles = discoverStyles(styleDirs(ctx.cwd));
+      const route = routeStyleCommand(args, styles.keys());
+
+      if (route.kind === "task") {
+        let task: string;
+        try {
+          task = buildStyleTask(leaderBrief(), ctx.cwd, resolveActiveStyle(ctx.cwd, styles), route.request);
+        } catch (err) {
+          ctx.ui.notify(`Could not build the output-style task: ${String(err)}`, "error");
+          return;
+        }
+        // Mid-stream the delivery mode is required; otherwise the message goes
+        // out immediately and triggers the turn.
+        pi.sendUserMessage(task, ctx.isIdle?.() === false ? { deliverAs: "followUp" } : undefined);
+        return;
+      }
+
+      const { name: requested, persist } = parseStyleCommandArgs(args);
+      const name = requested === null ? null : (resolveStyleName(requested, styles.keys()) ?? requested);
       const available = [...styles.keys()].sort().join(", ") || "(none)";
 
       const unknownFlags = args
@@ -355,7 +466,11 @@ export default function outputStyles(pi: ExtensionAPI): void {
           .sort((a, b) => a.name.localeCompare(b.name))
           .map(s => (s.description ? `${s.name} — ${s.description}` : s.name))
           .join("\n");
-        ctx.ui.notify(`Active style: ${current?.name ?? "(none)"}\nAvailable:\n${listing || "(none)"}`, "info");
+        ctx.ui.notify(
+          `Active style: ${current?.name ?? "(none)"}\nAvailable:\n${listing || "(none)"}\n\n` +
+            "/output-style <name|off> [--save] [--project] to switch, or /output-style <request> to have the agent review, rewrite, or create a style.",
+          "info",
+        );
         return;
       }
       if (OFF_WORDS[name.toLowerCase()]) {

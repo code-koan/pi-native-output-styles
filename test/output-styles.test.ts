@@ -16,6 +16,10 @@ import outputStyles, {
   userStylesDir,
   projectStylesDir,
   configHome,
+  styleCatalog,
+  routeStyleCommand,
+  buildStyleTask,
+  leaderBrief,
   styleCompletions,
   styleHintFor,
   startHintPoller,
@@ -241,7 +245,7 @@ describe("bundled styles", () => {
 
   test("every starter style discovers with a non-empty body and description", () => {
     const m = discoverStyles([bundledStylesDir()]);
-    for (const name of ["concise", "explanatory", "teacher", "reviewer", "diagrams-first", "ste", "eli5"]) {
+    for (const name of ["caveman", "concise", "explanatory", "teacher", "reviewer", "diagrams-first", "ste", "eli5"]) {
       expect(m.has(name)).toBe(true);
       expect(m.get(name)!.body.length).toBeGreaterThan(0);
       expect(m.get(name)!.description.length).toBeGreaterThan(0);
@@ -257,11 +261,13 @@ interface Captured {
   notes: { message: string; type?: string }[];
   widgets: { key: string; lines: string[] | null }[];
   timers: (() => void)[];
+  userMessages: { content: string; deliverAs?: string }[];
   editorText: string;
 }
 interface FakeCtx {
   cwd: string;
   hasUI: boolean;
+  isIdle: () => boolean;
   ui: {
     setStatus: (k: string, t: string | undefined) => void;
     setWidget: (k: string, lines: string[] | undefined) => void;
@@ -272,10 +278,20 @@ interface FakeCtx {
 }
 
 function harness(cwd: string): { cap: Captured; ctx: FakeCtx } {
-  const cap: Captured = { commands: {}, handlers: {}, statuses: [], notes: [], widgets: [], timers: [], editorText: "" };
+  const cap: Captured = {
+    commands: {},
+    handlers: {},
+    statuses: [],
+    notes: [],
+    widgets: [],
+    timers: [],
+    userMessages: [],
+    editorText: "",
+  };
   const ctx: FakeCtx = {
     cwd,
     hasUI: true,
+    isIdle: () => true,
     ui: {
       setStatus: (_k, t) => cap.statuses.push(t),
       setWidget: (k, lines) => cap.widgets.push({ key: k, lines: lines ?? null }),
@@ -295,6 +311,8 @@ function harness(cwd: string): { cap: Captured; ctx: FakeCtx } {
     registerCommand: (name: string, def: { handler: (a: string, c: FakeCtx) => unknown }) => {
       cap.commands[name] = def.handler;
     },
+    sendUserMessage: (content: string, options?: { deliverAs?: "steer" | "followUp" }) =>
+      cap.userMessages.push({ content, deliverAs: options?.deliverAs }),
   };
   // Fake pi implements only the surface the extension uses; its handler/ctx
   // types are intentionally narrower than the real ExtensionAPI, so bridge
@@ -321,19 +339,18 @@ describe("extension wiring", () => {
   // NOTE: order matters. `session` is module-level and persists across tests in
   // this file, and "teacher" is a bundled style discoverable from any cwd, so
   // the teacher-session test must run after this "no active style" case.
-  test("/style unknown → error notice and no prompt change", async () => {
+  test("/output-style <Name> activates the canonical case-insensitive match", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("nope-not-real", ctx);
-    expect(cap.notes.some(n => n.type === "error")).toBe(true);
-    const result = await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx);
-    expect(result).toBeUndefined();
+    await cap.commands["output-style"]("Teacher", ctx);
+    expect(cap.notes.some(n => n.type === "error")).toBe(false);
+    expect(resolveActiveStyle(cwd)?.name).toBe("teacher");
   });
 
-  test("/style teacher (session) → hook prepends the teacher block", async () => {
+  test("/output-style teacher (session) → hook prepends the teacher block", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher", ctx);
+    await cap.commands["output-style"]("teacher", ctx);
     const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
       systemPrompt: string;
     };
@@ -342,24 +359,24 @@ describe("extension wiring", () => {
     expect(result.systemPrompt.startsWith("# Personality\n")).toBe(true);
     expect(result.systemPrompt.endsWith("BASE")).toBe(true);
     expect(cap.notes.some(n => n.type === "info")).toBe(true);
-    // Personal-by-default: a bare /style (no --save/--project flag) must not
+    // Personal-by-default: a bare /output-style (no --save/--project flag) must not
     // persist anything to disk — only `session` (in-memory) changes.
     expect(readState(projectStateFile(cwd))).toEqual({});
     expect(readState(userStateFile())).toEqual({});
   });
 
-  test("/style teacher --project persists to the project state file", async () => {
+  test("/output-style teacher --project persists to the project state file", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher --project", ctx);
+    await cap.commands["output-style"]("teacher --project", ctx);
     expect(readState(projectStateFile(cwd))).toEqual({ active: "teacher" });
     expect(readState(userStateFile())).toEqual({});
   });
 
-  test("/style teacher --save persists to the user state file only", async () => {
+  test("/output-style teacher --save persists to the user state file only", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher --save", ctx);
+    await cap.commands["output-style"]("teacher --save", ctx);
     expect(readState(userStateFile())).toEqual({ active: "teacher" });
     expect(readState(projectStateFile(cwd))).toEqual({});
   });
@@ -382,23 +399,23 @@ describe("extension wiring", () => {
     expect(cap.statuses).toEqual([]);
   });
 
-  test("/style <unknown> does not clobber the active style", async () => {
+  test("/output-style <unknown> does not clobber the active style", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher", ctx);
+    await cap.commands["output-style"]("teacher", ctx);
     const first = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
       systemPrompt: string;
     };
     expect(first.systemPrompt).toContain("<!-- output-styles:teacher -->");
 
-    await cap.commands["style"]("nope-not-real", ctx);
+    await cap.commands["output-style"]("nope-not-real", ctx);
     const second = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
       systemPrompt: string;
     };
     expect(second.systemPrompt).toContain("<!-- output-styles:teacher -->");
   });
 
-  test("/style teacher resolves a .pi/output-styles definition over the bundled one", async () => {
+  test("/output-style teacher resolves a .pi/output-styles definition over the bundled one", async () => {
     const cwd = freshCwd("pos-wire-");
     mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
     writeFileSync(
@@ -406,14 +423,14 @@ describe("extension wiring", () => {
       "---\nname: teacher\ndescription: local\n---\nPROJECT-OVERRIDE-BODY",
     );
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher", ctx);
+    await cap.commands["output-style"]("teacher", ctx);
     const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
       systemPrompt: string;
     };
     expect(result.systemPrompt).toContain("PROJECT-OVERRIDE-BODY");
   });
 
-  test("a .pi/output-styles.json project default activates a style with no /style call", async () => {
+  test("a .pi/output-styles.json project default activates a style with no /output-style call", async () => {
     const cwd = freshCwd("pos-wire-");
     writeState(projectStateFile(cwd), { active: "teacher" });
     expect(resolveActiveStyle(cwd)?.name).toBe("teacher");
@@ -427,24 +444,24 @@ describe("extension wiring", () => {
   test("before_agent_start never throws even when the event is malformed", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher", ctx);
+    await cap.commands["output-style"]("teacher", ctx);
     const malformedEvent = { prompt: "hi", systemPrompt: 42 };
     const result = await cap.handlers["before_agent_start"](malformedEvent, ctx);
     expect(result).toBeUndefined();
   });
 
-  test("/style teacher --project notifies a warning and does not throw when saving fails", async () => {
+  test("/output-style teacher --project notifies a warning and does not throw when saving fails", async () => {
     const cwd = freshCwd("pos-wire-");
     writeFileSync(join(cwd, ".pi"), "not a directory");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher --project", ctx);
+    await cap.commands["output-style"]("teacher --project", ctx);
     expect(cap.notes.some(n => n.type === "warning" && n.message.includes("saving failed"))).toBe(true);
   });
 
-  test("/style teacher --saev warns about the unknown flag and still applies teacher", async () => {
+  test("/output-style teacher --saev warns about the unknown flag and still applies teacher", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("teacher --saev", ctx);
+    await cap.commands["output-style"]("teacher --saev", ctx);
     expect(cap.notes.some(n => n.type === "warning" && n.message.includes("--saev"))).toBe(true);
     const result = (await cap.handlers["before_agent_start"]({ prompt: "hi", systemPrompt: "BASE" }, ctx)) as {
       systemPrompt: string;
@@ -452,38 +469,38 @@ describe("extension wiring", () => {
     expect(result.systemPrompt).toContain("<!-- output-styles:teacher -->");
   });
 
-  test("/style (no args) lists styles with their descriptions", async () => {
+  test("/output-style (no args) lists styles with their descriptions", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
-    await cap.commands["style"]("", ctx);
+    await cap.commands["output-style"]("", ctx);
     const info = cap.notes.find(n => n.type === "info");
     expect(info?.message).toContain("Teach as you go; explain concepts before applying them");
   });
 
-  test("/style off overrides a saved default and clears the session", async () => {
+  test("/output-style off overrides a saved default and clears the session", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     writeState(userStateFile(), { active: "teacher" }); // a saved default exists
-    await cap.commands["style"]("teacher", ctx);
+    await cap.commands["output-style"]("teacher", ctx);
     expect(resolveActiveStyle(cwd)?.name).toBe("teacher");
-    await cap.commands["style"]("off", ctx);
+    await cap.commands["output-style"]("off", ctx);
     expect(resolveActiveStyle(cwd)).toBeNull();
     expect(cap.notes.some(n => n.type === "info" && n.message.toLowerCase().includes("off"))).toBe(true);
   });
 
-  test("/style none is an alias for off", async () => {
+  test("/output-style none is an alias for off", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     writeState(userStateFile(), { active: "teacher" });
-    await cap.commands["style"]("none", ctx);
+    await cap.commands["output-style"]("none", ctx);
     expect(resolveActiveStyle(cwd)).toBeNull();
   });
 
-  test("/style off --save clears the saved user default", async () => {
+  test("/output-style off --save clears the saved user default", async () => {
     const cwd = freshCwd("pos-wire-");
     const { cap, ctx } = harness(cwd);
     writeState(userStateFile(), { active: "teacher" });
-    await cap.commands["style"]("off --save", ctx);
+    await cap.commands["output-style"]("off --save", ctx);
     expect(readState(userStateFile())).toEqual({});
   });
 });
@@ -505,6 +522,7 @@ describe("styleCompletions", () => {
   test("empty prefix returns all bundled styles plus off, sorted", () => {
     const items = styleCompletions("", freshCwd("pos-comp-"))!;
     expect(items.map(i => i.value)).toEqual([
+      "caveman",
       "concise",
       "diagrams-first",
       "eli5",
@@ -537,29 +555,47 @@ describe("styleCompletions", () => {
 });
 
 describe("styleHintFor", () => {
-  test("shows the flag hint while a /style command is composed", () => {
-    for (const text of ["/style", "/style ", "/style concise", "/style concise --save", "  /style off --project"]) {
+  test("shows the hint while an /output-style command is composed", () => {
+    for (const text of [
+      "/output-style",
+      "/output-style ",
+      "/output-style concise",
+      "/output-style concise --save",
+      "  /output-style off --project",
+    ]) {
       const lines = styleHintFor(text);
       expect(lines).not.toBeNull();
+      // Line 1 is the management form, line 2 advertises the agent form.
       expect(lines![0]).toContain("--save");
-      expect(lines![1]).toContain("--project");
+      expect(lines![0]).toContain("--project");
+      expect(lines![1]).toContain("review, rewrite, or create");
     }
   });
 
-  test("hides the hint when the input is not a /style command", () => {
-    for (const text of ["", "hello", "/styl", "/stylex", "x /style", "/mcp add", "/style:other"]) {
+  test("hides the hint when the input is not an /output-style command", () => {
+    for (const text of [
+      "",
+      "hello",
+      "/styl",
+      "/style",
+      "/output-styl",
+      "/output-styleX",
+      "x /output-style",
+      "/mcp add",
+      "/output-style:other",
+    ]) {
       expect(styleHintFor(text)).toBeNull();
     }
   });
 });
 
 describe("startHintPoller", () => {
-  test("shows the flag widget while /style is composed, then clears it", () => {
+  test("shows the hint widget while /output-style is composed, then clears it", () => {
     const { cap, ctx } = harness(freshCwd("pos-poll-"));
     startHintPoller(ctx);
     expect(cap.timers).toHaveLength(1);
 
-    cap.editorText = "/style concise";
+    cap.editorText = "/output-style concise";
     cap.timers[0](); // tick 1: text changed → debounce, no widget yet
     expect(cap.widgets).toEqual([]);
     cap.timers[0](); // tick 2: stable → widget shown
@@ -576,5 +612,206 @@ describe("startHintPoller", () => {
     cap.timers[0]();
     expect(cap.widgets).toHaveLength(2);
     expect(cap.widgets[1].lines).toBeNull();
+  });
+});
+
+describe("styleCatalog", () => {
+  test("reports the winning definition per name with tier and real path", () => {
+    const cwd = freshCwd("pos-cat-");
+    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "output-styles", "teacher.md"), "---\nname: teacher\ndescription: local\n---\nX");
+    const catalog = styleCatalog(cwd);
+
+    const teacher = catalog.find(s => s.name === "teacher")!;
+    expect(teacher.tier).toBe("project");
+    expect(teacher.path).toBe(join(cwd, ".pi", "output-styles", "teacher.md"));
+    expect(teacher.description).toBe("local");
+
+    // Bundled styles remain visible and are marked non-writable.
+    const concise = catalog.find(s => s.name === "concise")!;
+    expect(concise.tier).toBe("bundled");
+    expect(concise.path).toBe(join(bundledStylesDir(), "concise.md"));
+  });
+
+  test("is sorted and never repeats a name", () => {
+    const cwd = freshCwd("pos-cat-");
+    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "output-styles", "teacher.md"), "---\nname: teacher\n---\nX");
+    const names = styleCatalog(cwd).map(s => s.name);
+    expect(names).toEqual([...names].sort());
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe("leader brief", () => {
+  test("loads from disk and stays short enough to maintain", () => {
+    const brief = leaderBrief();
+    expect(brief.startsWith("# Output style task")).toBe(true);
+    // Guard against prompt creep: this is a task brief, not a system prompt.
+    expect(brief.length).toBeLessThan(3000);
+  });
+
+  test("tells the leader it decides on delegation and owns the write", () => {
+    const brief = leaderBrief();
+    expect(brief).toContain("Delegation");
+    expect(brief).toContain("subagent");
+    expect(brief).toContain("never hand the file off");
+    // Observed failure: a delegated child wrote the style file itself.
+    expect(brief).toContain("never write files");
+    // Observed failure: a review silently rewrote the file.
+    expect(brief).toContain("Review means report, not edit");
+  });
+});
+
+describe("buildStyleTask", () => {
+  test("passes the user's words through verbatim under a Request heading", () => {
+    const cwd = freshCwd("pos-task-");
+    const request = "重写这个 output style，让它更简洁、更适合编程";
+    const task = buildStyleTask(leaderBrief(), cwd, null, request);
+    expect(task.endsWith(`## Request\n\n${request}`)).toBe(true);
+    expect(task).toContain("## Context");
+  });
+
+  test("names the active style, both writable dirs, and every discovered style", () => {
+    const cwd = freshCwd("pos-task-");
+    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "output-styles", "custom.md"), "---\nname: custom\ndescription: mine\n---\nX");
+    const task = buildStyleTask(leaderBrief(), cwd, { name: "teacher", description: "", body: "" }, "review");
+    expect(task).toContain("Active style: teacher");
+    expect(task).toContain(`Project style dir: ${projectStylesDir(cwd)}`);
+    expect(task).toContain(`User style dir: ${userStylesDir()}`);
+    expect(task).toContain(`- custom [project] ${join(cwd, ".pi", "output-styles", "custom.md")} — mine`);
+    expect(task).toContain("[bundled]");
+  });
+
+  test("reports no active style when nothing is selected", () => {
+    const cwd = freshCwd("pos-task-");
+    expect(buildStyleTask("brief", cwd, null, "review")).toContain("Active style: (none)");
+  });
+});
+
+describe("/output-style command", () => {
+  test("routes a review request to the agent as one user message", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("帮我审核一下这个 output style", ctx);
+    expect(cap.userMessages).toHaveLength(1);
+    expect(cap.userMessages[0].content).toContain("帮我审核一下这个 output style");
+    expect(cap.userMessages[0].content).toContain("# Output style task");
+    // Idle: no delivery mode needed, the message triggers the turn directly.
+    expect(cap.userMessages[0].deliverAs).toBeUndefined();
+  });
+
+  test("carries the live state to the agent (active style + catalog)", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("teacher", ctx);
+    await cap.commands["output-style"]("review it", ctx);
+    const task = cap.userMessages[0].content;
+    expect(task).toContain("Active style: teacher");
+    expect(task).toContain(`- teacher [bundled] ${join(bundledStylesDir(), "teacher.md")}`);
+  });
+
+  test("create request works with no styles in the project yet", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("创建一个适合代码 Review 的 output style", ctx);
+    expect(cap.userMessages).toHaveLength(1);
+    expect(cap.userMessages[0].content).toContain("创建一个适合代码 Review 的 output style");
+    expect(cap.userMessages[0].content).toContain(`Project style dir: ${projectStylesDir(cwd)}`);
+  });
+
+  test("empty request lists styles instead of starting a task", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("   ", ctx);
+    expect(cap.userMessages).toHaveLength(0);
+    const info = cap.notes.find(n => n.type === "info");
+    expect(info?.message).toContain("Active style:");
+    expect(info?.message).toContain("caveman");
+  });
+
+  test("a bare style name stays management, not a task", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("caveman", ctx);
+    expect(cap.userMessages).toHaveLength(0);
+    expect(resolveActiveStyle(cwd)?.name).toBe("caveman");
+    expect(cap.notes.some(n => n.message.includes('Output style → "caveman"'))).toBe(true);
+  });
+
+  test("flags after a style name stay management", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("caveman --project", ctx);
+    expect(cap.userMessages).toHaveLength(0);
+    expect(readState(projectStateFile(cwd))).toEqual({ active: "caveman" });
+  });
+
+  test("off/none stay management", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("teacher", ctx);
+    await cap.commands["output-style"]("off", ctx);
+    expect(cap.userMessages).toHaveLength(0);
+    expect(resolveActiveStyle(cwd)).toBeNull();
+  });
+
+  test("an unknown bare word becomes a task, not an unknown-style error", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["output-style"]("summarize", ctx);
+    expect(cap.userMessages).toHaveLength(1);
+    expect(cap.userMessages[0].content).toContain("summarize");
+    expect(cap.notes.some(n => n.type === "error")).toBe(false);
+  });
+});
+
+describe("routeStyleCommand", () => {
+  const names = ["teacher", "concise", "caveman"];
+
+  test("empty and flag-only input is management", () => {
+    expect(routeStyleCommand("", names)).toEqual({ kind: "manage" });
+    expect(routeStyleCommand("   ", names)).toEqual({ kind: "manage" });
+    expect(routeStyleCommand("--save", names)).toEqual({ kind: "manage" });
+  });
+
+  test("off and none are management", () => {
+    expect(routeStyleCommand("off", names)).toEqual({ kind: "manage" });
+    expect(routeStyleCommand("NONE", names)).toEqual({ kind: "manage" });
+    expect(routeStyleCommand("off --project", names)).toEqual({ kind: "manage" });
+  });
+
+  test("a single known style name, case-insensitively, is management", () => {
+    expect(routeStyleCommand("teacher", names)).toEqual({ kind: "manage" });
+    expect(routeStyleCommand("Teacher", names)).toEqual({ kind: "manage" });
+    expect(routeStyleCommand("teacher --save", names)).toEqual({ kind: "manage" });
+  });
+
+  test("anything else is a task carrying the raw request", () => {
+    expect(routeStyleCommand("review teacher", names)).toEqual({ kind: "task", request: "review teacher" });
+    expect(routeStyleCommand("summarize", names)).toEqual({ kind: "task", request: "summarize" });
+    expect(routeStyleCommand("创建一个 review 风格", names)).toEqual({
+      kind: "task",
+      request: "创建一个 review 风格",
+    });
+    // Two words is never management, even if the first is a style name.
+    expect(routeStyleCommand("concise please", names)).toEqual({ kind: "task", request: "concise please" });
+  });
+
+  test("a request longer than one word keeps its original spacing and casing", () => {
+    const request = "  Rewrite   Concise  ";
+    expect(routeStyleCommand(request, names)).toEqual({ kind: "task", request: request.trim() });
+  });
+});
+
+describe("/output-style while streaming", () => {
+  test("mid-stream delivery uses followUp so the message is not dropped", async () => {
+    const cwd = freshCwd("pos-os-");
+    const { cap, ctx } = harness(cwd);
+    const busy: FakeCtx = { ...ctx, isIdle: () => false };
+    await cap.commands["output-style"]("rewrite the eli5 style", busy);
+    expect(cap.userMessages).toHaveLength(1);
+    expect(cap.userMessages[0].deliverAs).toBe("followUp");
   });
 });
