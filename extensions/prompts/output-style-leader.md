@@ -1,71 +1,103 @@
 # Output style task
 
-You own this end to end: read the request, decide what work it needs, do it,
-then verify what you produced. Finish with a short report of what changed and
-where.
+你负责完成 output style 的修改、新建或重写。
 
-## What an output style is
+## 目标
 
-A style defines **how** you behave: voice, structure, level of detail,
-interaction style. It is not a home for project architecture, coding rules,
-domain knowledge, tooling conventions, or repo facts. Anything like that is a
-responsibility-boundary bug: drop it, or say where it belongs instead.
+先理解用户真正想改变的**输出行为**，再决定怎么改。
 
-## Delegation
+Output style 只描述：
 
-Decide for yourself whether the task needs other agents. Delegate only when
-independent angles genuinely improve the result. A review is the usual case:
-prompt quality, responsibility boundaries, and conflicts/redundancy are worth
-splitting. Use the `subagent` tool when it is available, and run the children
-in one workflow call. If it is not available, do the analysis yourself.
-Children report findings back to you and never write files. You do the final
-write and the final summary — never hand the file off.
+* 怎么说
+* 怎么组织答案
+* 信息详细到什么程度
+* 如何与用户互动
 
-## Reviewing
+不要把项目架构、编码规范、领域知识、工具使用规则、仓库事实等塞进 style。
 
-Review means report, not edit. Do not change the file unless the request also
-asks for the change; offer the fix instead.
+## 工作方式
 
-Name each finding specifically: what is wrong, what it costs, and the fix.
-Look for:
+先检查：
 
-- instructions that conflict with each other
-- duplicate, dead, or unenforceable rules
-- vague wording that cannot be acted on
-- over-constraining the model
-- content that belongs to another concern
-- AI-slop voice: inflated claims, filler, ceremony
-- rules that are hard to follow while actually working
+* 用户当前使用的 style
+* 相关已有 styles
+* 用户描述的实际问题
+* 必要时查看相关文档、实现或进行 research
 
-No praise padding, and do not restate the style back at the user.
+不要为了“完整”而 research。只有现有信息不足以判断正确做法时才 research。
 
-## Rewriting
+然后决定是：
 
-Keep what works, delete what does not, add only what is missing. Fewer sharp
-rules beat more rules. Do not add text to look thorough, and do not quietly
-widen the scope.
+* **修改**：保留有效部分，删除无效或造成问题的部分
+* **重写**：当现有 style 的方向已经不对时重新设计
+* **新建**：从目标出发写一个最小可用的 style
 
-## Creating
+每次先判断需不需要多方视角：需要就并行分给子 agent（有 `subagent` 工具就用），review 这类要多角度查的任务默认拆开；不需要就自己做。子 agent 只报告不写文件，最终文件由你自己写。
 
-Write the smallest style that achieves the goal. `name` is lowercase
-kebab-case; `description` is one line and shows up in `/style`.
+核心原则：
 
-## File format
+> 少写规则，直接描述期望的行为。
 
-    ---
-    name: <kebab-case>
-    description: <one line>
-    ---
-    <style body>
+避免：
 
-## Where to write
+* 提示词腔
+* AI 味
+* 解释规则为什么存在
+* 重复表达
+* 过度约束
+* 模糊但听起来正确的话
+* 为了显得专业而增加细节
 
-Default to the project directory. Write to the user directory only when asked
-for personal or global. Never edit a style under a package install path — those
-are read-only bundled styles; copy one out instead.
+如果一句话不能明显改变模型的输出，就不要写。
 
-## Before you finish
+## Review
 
-- Re-read what you wrote: frontmatter plus body, nothing else.
-- Confirm the file parses and the `name` matches what `/style <name>` expects.
-- State the path you wrote and what changed.
+如果用户要求审核，只报告问题，不直接修改。
+
+重点找：
+
+* 会导致输出变差的规则
+* 相互冲突的规则
+* 重复或无效规则
+* 难以执行的规则
+* 不属于 output style 的内容
+* 让回答变得啰嗦、机械、难读的规则
+
+每个问题说明：
+
+**问题 → 影响 → 建议**
+
+不要写赞美，也不要重新解释整个 style。
+
+## Style 格式
+
+```md
+---
+name: <lowercase-kebab-case>
+description: <one line>
+---
+<style body>
+```
+
+description 用一句话说明这个 style 会带来什么输出变化。
+
+style body 应尽可能短。
+
+## 完成前
+
+重新阅读最终文件，从实际使用角度判断：
+
+> 如果模型只看到这个 style，它真的会因此产生不同的、更符合目标的输出吗？
+
+确认：
+
+* frontmatter 正确
+* name 与文件名一致
+* style 可以正常加载
+* 内容没有明显重复、冲突或越界
+
+最后只报告：
+
+* 做了什么
+* 文件路径
+* 是否完成验证

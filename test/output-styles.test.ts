@@ -667,13 +667,23 @@ describe("leader brief", () => {
 
   test("tells the leader it decides on delegation and owns the write", () => {
     const brief = leaderBrief();
-    expect(brief).toContain("Delegation");
+    // Delegation is what produced the multi-agent behaviour; the final write is
+    // the leader's alone.
     expect(brief).toContain("subagent");
-    expect(brief).toContain("never hand the file off");
+    expect(brief).toContain("最终文件由你自己写");
     // Observed failure: a delegated child wrote the style file itself.
-    expect(brief).toContain("never write files");
-    // Observed failure: a review silently rewrote the file.
-    expect(brief).toContain("Review means report, not edit");
+    expect(brief).toContain("子 agent 只报告不写文件");
+  });
+
+  test("scopes a style to output behaviour and keeps review report-only", () => {
+    const brief = leaderBrief();
+    expect(brief).toContain("怎么说");
+    expect(brief).toContain("项目架构");
+    // Observed failure: a review silently rewrote the file it was asked to review.
+    expect(brief).toContain("只报告问题，不直接修改");
+    // The report is meant to be three fields, not prose.
+    expect(brief).toContain("文件路径");
+    expect(brief).toContain("是否完成验证");
   });
 });
 

@@ -71,7 +71,7 @@ Review findings are specific: conflicting instructions, duplicate or unenforceab
 
 A review reports; it does not edit. The file is written only when the request asks for a change. In observed runs the agent delegated on its own when a task had several independent angles to check, and worked solo on a small single-file review.
 
-The brief lives in [`extensions/prompts/output-style-leader.md`](extensions/prompts/output-style-leader.md) and is plain Markdown — edit it without touching code.
+The brief lives in [`extensions/prompts/output-style-leader.md`](extensions/prompts/output-style-leader.md) and is plain Markdown — edit it without touching code. It is written in Chinese; translate or replace it freely.
 
 ## Bundled styles
 

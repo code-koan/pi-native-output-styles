@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+
+### Changed
+
+- Rewrote the leader brief around behaviour instead of rules. It now says what a style may and may not describe, asks for the smallest set of sentences that actually change output, and decides between edit / rewrite / create instead of following a fixed flow. Review stays report-only, and the final report is three fields: what changed, the file path, whether it was verified.
+- The brief is now written in Chinese. It is still plain Markdown in `extensions/prompts/output-style-leader.md`.
+
+### Fixed
+
+- Delegation went dormant under the rewrite. Measured over live runs on the same task, the previous brief delegated 4 of 6 times; the permissive phrasing in the rewrite produced 0 of 4, including a run whose request asked for a two-file comparison. Naming a default — "多角度任务（如 review）默认拆开" — restored it: review then split into two children, with report-only and no-child-writes both still holding.
+
 ## 0.6.0
 
 ### Added
