@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-12
+
+Fork of [LoneExile/pi-output-styles](https://github.com/LoneExile/pi-output-styles) at 0.3.3.
+
+### Added
+- **Pi-native directory support.** Styles now resolve from `~/.pi/agent/output-styles/` and `<repo>/.pi/output-styles/`, ahead of the OMP `.omp/` layout. Defaults written by `--save` / `--project` go to `~/.pi/agent/output-styles.json` and `<repo>/.pi/output-styles.json`.
+- `PI_CODING_AGENT_DIR` is honoured as the user config root (default `~/.pi/agent`).
+
+### Changed
+- Style definitions are discovered low → high: bundled < OMP user < OMP project < Pi user < Pi project. Active-style resolution walks session → Pi user → Pi project → OMP user → OMP project.
+- On a prompt with no `# Personality` slot and no `§` sections — Pi's assembled prompt, or a custom `SYSTEM.md` — the style is now **prepended** as a `# Personality` block instead of appended after the tool list and cwd line.
+- Author, repository, and badges point at the fork; the npm publishing workflow was dropped (the npm name belongs to upstream).
+
 ## [0.3.3] - 2026-08-26
 
 ### Changed

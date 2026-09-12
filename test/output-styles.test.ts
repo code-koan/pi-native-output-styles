@@ -12,6 +12,10 @@ import outputStyles, {
   bundledStylesDir,
   projectStateFile,
   userStateFile,
+  userStylesDir,
+  projectStylesDir,
+  ompUserStateFile,
+  ompProjectStateFile,
   styleCompletions,
   styleHintFor,
   startHintPoller,
@@ -143,6 +147,46 @@ describe("resolveActiveName", () => {
     expect(resolveActiveName(null, {}, { active: "p" })).toBe("p");
     expect(resolveActiveName(null, {}, {})).toBe(null);
   });
+
+  test("walks the whole state chain in order (pi user > pi project > omp user > omp project)", () => {
+    const chain = [{ active: "pi-user" }, { active: "pi-project" }, { active: "omp-user" }, { active: "omp-project" }];
+    expect(resolveActiveName(null, ...chain)).toBe("pi-user");
+    expect(resolveActiveName(null, ...chain.slice(1))).toBe("pi-project");
+    expect(resolveActiveName(null, ...chain.slice(2))).toBe("omp-user");
+    expect(resolveActiveName(null, ...chain.slice(3))).toBe("omp-project");
+    expect(resolveActiveName("session", ...chain)).toBe("session");
+  });
+});
+
+describe("pi-native locations", () => {
+  test("user and project paths resolve under .pi", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pos-pi-"));
+    const home = mkdtempSync(join(tmpdir(), "pos-pihome-"));
+    process.env.PI_OUTPUT_STYLES_HOME = home;
+    expect(userStylesDir()).toBe(join(home, "output-styles"));
+    expect(userStateFile()).toBe(join(home, "output-styles.json"));
+    expect(projectStylesDir(cwd)).toBe(join(cwd, ".pi", "output-styles"));
+    expect(projectStateFile(cwd)).toBe(join(cwd, ".pi", "output-styles.json"));
+    // OMP names are unchanged so existing OMP defaults still resolve.
+    expect(ompUserStateFile().endsWith(join(".omp", "agent", "pi-output-styles.json"))).toBe(true);
+    expect(ompProjectStateFile(cwd)).toBe(join(cwd, ".omp", "pi-output-styles.json"));
+  });
+
+  test("PI_CODING_AGENT_DIR sets the user root when PI_OUTPUT_STYLES_HOME is unset", () => {
+    const home = mkdtempSync(join(tmpdir(), "pos-agentdir-"));
+    const previous = { home: process.env.PI_OUTPUT_STYLES_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+    delete process.env.PI_OUTPUT_STYLES_HOME;
+    process.env.PI_CODING_AGENT_DIR = home;
+    try {
+      expect(userStylesDir()).toBe(join(home, "output-styles"));
+      expect(userStateFile()).toBe(join(home, "output-styles.json"));
+    } finally {
+      if (previous.home === undefined) delete process.env.PI_OUTPUT_STYLES_HOME;
+      else process.env.PI_OUTPUT_STYLES_HOME = previous.home;
+      if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    }
+  });
 });
 
 describe("applyStyle", () => {
@@ -239,10 +283,10 @@ describe("replacePersonalitySection", () => {
     expect(text).toContain("\n§ Runtime\nTools stay.");
   });
 
-  test("appends a personality heading when the prompt has no § sections", () => {
+  test("prepends a personality heading when the prompt has no § sections (Pi shape)", () => {
     const { text, swapped } = replacePersonalitySection("Just a custom SYSTEM.md.", "ELI5");
     expect(swapped).toBe(false);
-    expect(text).toBe("Just a custom SYSTEM.md.\n\n# Personality\nELI5");
+    expect(text).toBe("# Personality\nELI5\n\nJust a custom SYSTEM.md.");
   });
 });
 
@@ -555,7 +599,7 @@ describe("extension wiring", () => {
     expect(second.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
   });
 
-  test("/style teacher resolves the project-local definition over the bundled one", async () => {
+  test("/style teacher resolves the project-local .omp definition over the bundled one (legacy OMP layout)", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
     process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
     mkdirSync(join(cwd, ".omp", "output-styles"), { recursive: true });
@@ -572,6 +616,33 @@ describe("extension wiring", () => {
     expect(result.systemPrompt[0]).toContain("PROJECT-OVERRIDE-BODY");
   });
 
+  test("/style teacher finds .pi/output-styles and wins over .omp", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
+    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    mkdirSync(join(cwd, ".omp", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".omp", "output-styles", "teacher.md"), "---\nname: teacher\n---\nOMP-BODY");
+    mkdirSync(join(cwd, ".pi", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "output-styles", "teacher.md"), "---\nname: teacher\n---\nPI-BODY");
+    const { cap, ctx } = harness(cwd);
+    await cap.commands["style"]("teacher", ctx);
+    const result = (await cap.handlers["before_agent_start"](
+      { prompt: "hi", systemPrompt: ["BASE"] },
+      ctx,
+    )) as { systemPrompt: string[] };
+    expect(result.systemPrompt[0]).toContain("PI-BODY");
+    expect(result.systemPrompt[0]).not.toContain("OMP-BODY");
+    expect(result.systemPrompt[0]).toContain("<!-- pi-output-styles:teacher -->");
+  });
+
+  test("a .pi/output-styles.json project default beats a .omp one", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
+    process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
+    mkdirSync(join(cwd, ".omp"), { recursive: true });
+    writeFileSync(join(cwd, ".omp", "pi-output-styles.json"), JSON.stringify({ active: "concise" }));
+    writeState(projectStateFile(cwd), { active: "teacher" });
+    expect(resolveActiveStyle(cwd)?.name).toBe("teacher");
+  });
+
   test("before_agent_start never throws even if applyStyleReplace would (malformed base)", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
     process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
@@ -585,7 +656,7 @@ describe("extension wiring", () => {
   test("/style teacher --project notifies a warning and does not throw when saving fails", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pos-wire-"));
     process.env.PI_OUTPUT_STYLES_HOME = mkdtempSync(join(tmpdir(), "pos-home-"));
-    writeFileSync(join(cwd, ".omp"), "not a directory");
+    writeFileSync(join(cwd, ".pi"), "not a directory");
     const { cap, ctx } = harness(cwd);
     await cap.commands["style"]("teacher --project", ctx);
     expect(cap.notes.some(n => n.type === "warning" && n.message.includes("saving failed"))).toBe(true);

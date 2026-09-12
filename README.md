@@ -1,42 +1,28 @@
 # pi-output-styles
 
-[![npm version](https://img.shields.io/npm/v/pi-output-styles.svg)](https://www.npmjs.com/package/pi-output-styles)
-[![npm downloads](https://img.shields.io/npm/dm/pi-output-styles.svg)](https://www.npmjs.com/package/pi-output-styles)
-[![CI](https://github.com/LoneExile/pi-output-styles/actions/workflows/ci.yml/badge.svg)](https://github.com/LoneExile/pi-output-styles/actions/workflows/ci.yml)
-[![license](https://img.shields.io/npm/l/pi-output-styles.svg)](./LICENSE)
+[![CI](https://github.com/code-koan/pi-output-styles/actions/workflows/ci.yml/badge.svg)](https://github.com/code-koan/pi-output-styles/actions/workflows/ci.yml)
+[![license](https://cdn.jsdelivr.net/npm/pi-output-styles@0.3.3/LICENSE)](./LICENSE)
 
-Named, swappable system-prompt styles for [Oh My Pi (OMP)](https://pi.dev) and Pi — with a live `/style` switcher. Unlike Claude Code's output styles (which need `/clear` to switch), styles here apply and switch **live, mid-session**.
+Named, swappable system-prompt styles for [Pi](https://pi.dev) and [Oh My Pi (OMP)](https://pi.dev) — with a live `/style` switcher. Unlike Claude Code's output styles (which need `/clear` to switch), styles here apply and switch **live, mid-session**.
 
-An active style **replaces everything from `# Personality` through the next `§` heading** (including nested `# Tone` / `# Reasoning`). Tools, skills, Role, Engineering, Runtime, and later project/safety blocks stay. Applied every turn. Custom `SYSTEM.md` with no personality heading: inject before `§ Runtime`, else before the first other `§`, else at the end of block 0.
+This is a fork of [LoneExile/pi-output-styles](https://github.com/LoneExile/pi-output-styles) with **Pi-native `.pi/` directory support**. Upstream only reads `.omp/` paths, which means a Pi user has to create Oh My Pi's directory layout to add a style. Here, Pi's own locations come first.
 
-![/style demo](https://github.com/LoneExile/pi-output-styles/raw/main/assets/demo.gif)
+Two differences from upstream:
+
+1. **Pi-native paths.** Styles and defaults resolve from `.pi/` (`~/.pi/agent/…`, `<repo>/.pi/…`) before falling back to the OMP `.omp/` layout. Both work from one install.
+2. **Pi-shaped prompts.** Pi's assembled system prompt has no `# Personality` slot and no `§` sections, so the style is injected as a `# Personality` block at the **top** of the prompt instead of being appended after the tool list and cwd line.
 
 ## Install
 
 ```bash
-# Oh My Pi
-omp plugin install npm:pi-output-styles
-# or from source:
-omp plugin install github:LoneExile/pi-output-styles
-
 # Pi
-pi install npm:pi-output-styles
-# or from source:
-pi install git:github.com/LoneExile/pi-output-styles
+pi install git:github.com/code-koan/pi-output-styles
+
+# Oh My Pi
+omp plugin install github:code-koan/pi-output-styles
 ```
 
 Then start a **new** session. Extensions do not hot-reload.
-
-### Upgrading from 0.2.x
-
-`0.2.x` appended a footnote. `0.3+` replaces the personality slot. Lens styles (`concise`, `reviewer`, `ste`, `diagrams-first`, `explanatory`) now stand alone. Pin `0.2.1` if you need append. Uninstall first — install alone is a no-op on an existing OMP plugin:
-
-```bash
-omp plugin uninstall pi-output-styles && omp plugin install npm:pi-output-styles
-pi uninstall npm:pi-output-styles && pi install npm:pi-output-styles
-```
-
-Then a new session.
 
 ## Use
 
@@ -47,7 +33,19 @@ Then a new session.
 - `/style off` — clear the active style for this session (overrides any saved default). `none` is an alias; `off --save` / `off --project` also clears the saved default.
 - While composing `/style`, a hint line below the input shows the available flags (`--save` / `--project`).
 
-The style is applied every turn. The status line shows `style: eli5`. `/style off` restores OMP’s default personality on the next turn.
+The style is applied every turn. The status line shows `style: eli5`. `/style off` restores the default persona on the next turn.
+
+## How the style is applied
+
+On Oh My Pi, `# Personality` is a real slot in the assembled system prompt, and the active style **replaces everything from `# Personality` through the next `§` heading** (including nested `# Tone` / `# Reasoning`). Tools, skills, Role, Engineering, Runtime, and later project/safety blocks stay.
+
+On Pi — and for a custom `SYSTEM.md` with no personality heading — there is no slot to replace. The style is injected as:
+
+- before `§ Runtime` when the prompt has one,
+- else before the first `§` that is not `§ Role`,
+- else **prepended to the top of the prompt** (the Pi shape).
+
+Nothing is ever deleted except the OMP personality slot.
 
 ## Bundled styles
 
@@ -61,7 +59,12 @@ The style is applied every turn. The status line shows `style: eli5`. `/style of
 
 ## Custom styles
 
-Drop a Markdown file in either location (filename = style name unless overridden):
+Pi-native locations (checked first):
+
+- Project: `<repo>/.pi/output-styles/<name>.md`
+- Personal: `~/.pi/agent/output-styles/<name>.md`
+
+Oh My Pi locations (still supported, lower precedence):
 
 - Project: `<repo>/.omp/output-styles/<name>.md`
 - Personal: `~/.omp/agent/output-styles/<name>.md`
@@ -74,13 +77,23 @@ description: Teach as you go
 Act as a patient teacher. Explain the concept before applying it.
 ```
 
-The body becomes the personality slot. Precedence — **definitions**: project > user > bundled; **which style is active**: session `/style` > user default > project default.
+Filename = style name unless the frontmatter overrides it. Both scopes are searched, so the same `.pi/` directory works in Pi and OMP.
+
+Precedence — **definitions** (low → high): bundled < OMP user < OMP project < Pi user < Pi project. **Which style is active**: session `/style` > Pi user default > Pi project default > OMP user default > OMP project default.
 
 ## Config
 
-- `PI_OUTPUT_STYLES_HOME` — override the user config base (default `~/.omp/agent`).
-- User default (written by `--save`): `~/.omp/agent/pi-output-styles.json` (base overridable via `PI_OUTPUT_STYLES_HOME`).
-- Project default (written by `--project`, git-tracked): `<repo>/.omp/pi-output-styles.json`.
+| | Pi (preferred) | OMP (legacy) |
+| --- | --- | --- |
+| Project styles | `<repo>/.pi/output-styles/` | `<repo>/.omp/output-styles/` |
+| User styles | `~/.pi/agent/output-styles/` | `~/.omp/agent/output-styles/` |
+| Project default (`--project`) | `<repo>/.pi/output-styles.json` | `<repo>/.omp/pi-output-styles.json` |
+| User default (`--save`) | `~/.pi/agent/output-styles.json` | `~/.omp/agent/pi-output-styles.json` |
+
+Environment:
+
+- `PI_CODING_AGENT_DIR` — Pi's own config-dir override; sets the user root (default `~/.pi/agent`).
+- `PI_OUTPUT_STYLES_HOME` — higher-precedence override for the user root, for tests and non-standard layouts.
 
 ## Develop
 
@@ -89,3 +102,7 @@ bun install
 bun test
 bun x tsc --noEmit
 ```
+
+## License
+
+MIT. Original work © 2026 LoneExile; fork maintained under [code-koan](https://github.com/code-koan).

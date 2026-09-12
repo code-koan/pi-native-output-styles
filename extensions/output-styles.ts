@@ -106,15 +106,32 @@ export function discoverStyles(dirsLowToHigh: string[]): Map<string, Style> {
   return styles;
 }
 
-export function configHome(): string {
-  return process.env.PI_OUTPUT_STYLES_HOME || join(homedir(), ".omp", "agent");
+// Pi-native config roots come first: `PI_CODING_AGENT_DIR` (default
+// `~/.pi/agent`) for user scope and `<repo>/.pi` for project scope. Oh My Pi's
+// `~/.omp/agent` and `<repo>/.omp` stay supported at lower precedence, so one
+// install serves both harnesses.
+// `PI_OUTPUT_STYLES_HOME` overrides the Pi user root.
+export function piConfigHome(): string {
+  return process.env.PI_OUTPUT_STYLES_HOME || process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+}
+
+export function ompConfigHome(): string {
+  return join(homedir(), ".omp", "agent");
 }
 
 export function userStylesDir(): string {
-  return join(configHome(), "output-styles");
+  return join(piConfigHome(), "output-styles");
 }
 
 export function projectStylesDir(cwd: string): string {
+  return join(cwd, ".pi", "output-styles");
+}
+
+export function ompUserStylesDir(): string {
+  return join(ompConfigHome(), "output-styles");
+}
+
+export function ompProjectStylesDir(cwd: string): string {
   return join(cwd, ".omp", "output-styles");
 }
 
@@ -144,19 +161,26 @@ export function writeState(file: string, state: StyleState): void {
 }
 
 export function userStateFile(): string {
-  return join(configHome(), "pi-output-styles.json");
+  return join(piConfigHome(), "output-styles.json");
 }
 
 export function projectStateFile(cwd: string): string {
+  return join(cwd, ".pi", "output-styles.json");
+}
+
+// OMP state filenames keep their original name so existing OMP defaults still
+// resolve after upgrading.
+export function ompUserStateFile(): string {
+  return join(ompConfigHome(), "pi-output-styles.json");
+}
+
+export function ompProjectStateFile(cwd: string): string {
   return join(cwd, ".omp", "pi-output-styles.json");
 }
 
-export function resolveActiveName(
-  sessionActive: string | null,
-  userState: StyleState,
-  projectState: StyleState,
-): string | null {
-  return sessionActive ?? userState.active ?? projectState.active ?? null;
+// Ordered state chain: session beats the first saved default that sets one.
+export function resolveActiveName(sessionActive: string | null, ...states: StyleState[]): string | null {
+  return sessionActive ?? states.map(s => s.active).find((a): a is string => typeof a === "string") ?? null;
 }
 
 const MARKER_PREFIX = "<!-- pi-output-styles:";
@@ -191,7 +215,11 @@ export function replacePersonalitySection(text: string, inner: string): { text: 
   if (beforeRuntime !== text) return { text: beforeRuntime, swapped: false };
   const beforeOther = text.replace(/(\r?\n)§ (?!Role\b)/, (_m, nl: string) => `\n\n# Personality\n${inner}${nl}§ `);
   if (beforeOther !== text) return { text: beforeOther, swapped: false };
-  return { text: `${text}\n\n# Personality\n${inner}`, swapped: false };
+  // Pi's assembled prompt has no personality slot and no § sections at all
+  // (flat prose plus XML blocks), and a custom SYSTEM.md looks the same. Put
+  // the persona first, the way Claude Code output styles do, rather than
+  // after the tool list and cwd line.
+  return { text: `# Personality\n${inner}\n\n${text}`, swapped: false };
 }
 
 // Personality lives in block 0 of OMP's rebuilt-per-turn systemPrompt.
@@ -290,8 +318,14 @@ type SessionSelection = { type: "inherit" } | { type: "off" } | { type: "style";
 let session: SessionSelection = { type: "inherit" };
 
 function styleDirs(cwd: string): string[] {
-  // low → high precedence: bundled < user < project
-  return [bundledStylesDir(), userStylesDir(), projectStylesDir(cwd)];
+  // low → high precedence: bundled < OMP user < OMP project < Pi user < Pi project
+  return [
+    bundledStylesDir(),
+    ompUserStylesDir(),
+    ompProjectStylesDir(cwd),
+    userStylesDir(),
+    projectStylesDir(cwd),
+  ];
 }
 
 // Argument completions for `/style <name>`: matches style names by prefix.
@@ -325,6 +359,8 @@ export function resolveActiveStyle(cwd: string, styles?: Map<string, Style>): St
     sessionActive,
     readState(userStateFile()),
     readState(projectStateFile(cwd)),
+    readState(ompUserStateFile()),
+    readState(ompProjectStateFile(cwd)),
   );
   if (!name) return null;
   const map = styles ?? discoverStyles(styleDirs(cwd));
@@ -373,7 +409,8 @@ export default function outputStyles(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("style", {
-    description: "Select an output style (replaces the OMP personality slot), or clear it. Usage: /style [name|off] [--save] [--project]",
+    description:
+      "Select an output style (replaces the personality slot, or is injected when the prompt has none), or clear it. Usage: /style [name|off] [--save] [--project]",
     getArgumentCompletions: argumentPrefix => styleCompletions(argumentPrefix, process.cwd()),
     handler: (args, ctx) => {
       const { name, persist } = parseStyleCommandArgs(args);
