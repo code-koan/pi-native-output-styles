@@ -75,13 +75,15 @@ The brief lives in [`extensions/prompts/output-style-leader.md`](extensions/prom
 
 ## Bundled styles
 
-`caveman` · `concise` · `explanatory` · `teacher` · `reviewer` · `diagrams-first` · `ste` · `eli5`
+`caveman` · `concise` · `explanatory` · `teacher` · `reviewer` · `diagrams-first` · `ste` · `eli5` · `dense`
 
 `caveman` is [Carlos Mello's Caveman output style](https://github.com/carlosduplar/caveman-output-style-claude-code) — terse replies, no filler, same technical signal. The same repo also ships a more aggressive `caveman-ultra`; it is not bundled, but you can drop it into your own `output-styles/` directory unchanged.
 
 `ste` writes in [ASD-STE100](https://asd-ste100.org) Simplified Technical English, with the v2.0 action-first reply shape for person-addressed replies, tasks, issues, pull request descriptions, and commit messages. Adapted from [Ege Chelebi's ste-writing skill](https://github.com/woosal1337/blog/blob/9240b25eac013467554fd8217f319743aa0282b8/videos/ep01-the-cure-for-ai-slop/asd-ste100/SKILL.md).
 
 `eli5` is [Lydia Hallie's ELI5 style](https://x.com/lydiahallie/status/2080378470111256907).
+
+`dense` writes for Chinese-reading programmers: one complete judgement per sentence, scannable structure for overviews and inventory, the shortest length that still carries the decision, no AI filler. Its body is Chinese; the style name and description are the only English in it.
 
 ## Custom styles
 

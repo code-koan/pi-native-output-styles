@@ -249,7 +249,7 @@ describe("bundled styles", () => {
 
   test("every starter style discovers with a non-empty body and description", () => {
     const m = discoverStyles([bundledStylesDir()]);
-    for (const name of ["caveman", "concise", "explanatory", "teacher", "reviewer", "diagrams-first", "ste", "eli5"]) {
+    for (const name of ["caveman", "concise", "explanatory", "teacher", "reviewer", "diagrams-first", "ste", "eli5", "dense"]) {
       expect(m.has(name)).toBe(true);
       expect(m.get(name)!.body.length).toBeGreaterThan(0);
       expect(m.get(name)!.description.length).toBeGreaterThan(0);
@@ -538,6 +538,7 @@ describe("styleCompletions", () => {
     expect(items.map(i => i.value)).toEqual([
       "caveman",
       "concise",
+      "dense",
       "diagrams-first",
       "eli5",
       "explanatory",

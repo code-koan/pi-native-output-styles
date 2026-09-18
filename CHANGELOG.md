@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- Bundled `dense`, a Chinese-language style: one complete judgement per sentence, scannable structure for overviews, the shortest length that still carries the decision, no AI filler.
+
 ## 0.7.0
 
 ### Changed
